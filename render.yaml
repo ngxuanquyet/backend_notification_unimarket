@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: unimarket-notification-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: FIREBASE_PROJECT_ID
+        value: unimarket-e2582
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
