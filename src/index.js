@@ -440,9 +440,18 @@ async function fetchOrdersForActor({
   return mergedOrders
     .filter(Boolean)
     .reduce((accumulator, order) => {
-      const key = order.documentPath || order.id;
-      if (!accumulator.some((item) => (item.documentPath || item.id) === key)) {
+      const key = order.id || order.documentPath;
+      const existingIndex = accumulator.findIndex((item) => (item.id || item.documentPath) === key);
+      if (existingIndex < 0) {
         accumulator.push(order);
+        return accumulator;
+      }
+
+      const existing = accumulator[existingIndex];
+      const existingTimestamp = Math.max(existing.updatedAt || 0, existing.createdAt || 0);
+      const candidateTimestamp = Math.max(order.updatedAt || 0, order.createdAt || 0);
+      if (candidateTimestamp >= existingTimestamp) {
+        accumulator[existingIndex] = order;
       }
       return accumulator;
     }, [])
