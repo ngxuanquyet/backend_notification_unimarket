@@ -124,36 +124,38 @@ app.post("/checkout/buy-now", async (req, res) => {
       const subtotal = unitPrice * purchase.quantity;
       const total = subtotal + PLATFORM_FEE + deliveryFee;
       const sellerRef = db.collection("users").doc(sellerId);
+      const buyerOrderRef = buyerRef.collection("orders").doc(orderRef.id);
+      const sellerOrderRef = sellerRef.collection("orders").doc(orderRef.id);
+      const orderPayload = {
+        orderId: orderRef.id,
+        source: "buy_now",
+        status: "WAITING_CONFIRMATION",
+        buyerId,
+        buyerName: decodedToken.name || decodedToken.email || "Student Buyer",
+        sellerId,
+        sellerName,
+        productId: purchase.productId,
+        productName,
+        productImageUrl: imageUrls[0] || "",
+        productDetail: typeof product.condition === "string" ? product.condition : "",
+        unitPrice,
+        quantity: purchase.quantity,
+        subtotal,
+        platformFee: PLATFORM_FEE,
+        deliveryFee,
+        total,
+        paymentMethod: purchase.paymentMethod,
+        deliveryMethod: purchase.deliveryMethod,
+        meetingPoint: purchase.meetingPoint || "",
+        buyerAddress: purchase.buyerAddress || null,
+        sellerAddress: purchase.sellerAddress || null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
 
-      transaction.set(
-        orderRef,
-        {
-          orderId: orderRef.id,
-          source: "buy_now",
-          status: "WAITING_CONFIRMATION",
-          buyerId,
-          buyerName: decodedToken.name || decodedToken.email || "Student Buyer",
-          sellerId,
-          sellerName,
-          productId: purchase.productId,
-          productName,
-          productImageUrl: imageUrls[0] || "",
-          productDetail: typeof product.condition === "string" ? product.condition : "",
-          unitPrice,
-          quantity: purchase.quantity,
-          subtotal,
-          platformFee: PLATFORM_FEE,
-          deliveryFee,
-          total,
-          paymentMethod: purchase.paymentMethod,
-          deliveryMethod: purchase.deliveryMethod,
-          meetingPoint: purchase.meetingPoint || "",
-          buyerAddress: purchase.buyerAddress || null,
-          sellerAddress: purchase.sellerAddress || null,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-      );
+      transaction.set(orderRef, orderPayload);
+      transaction.set(buyerOrderRef, orderPayload);
+      transaction.set(sellerOrderRef, orderPayload);
       transaction.set(
         productRef,
         {
@@ -239,6 +241,12 @@ app.post("/orders/:orderId/status", async (req, res) => {
       const nextStatus = statusUpdate.status;
       const deliveryMethod =
         typeof order.deliveryMethod === "string" ? order.deliveryMethod.trim() : "";
+      const buyerOrderRef = buyerId
+        ? db.collection("users").doc(buyerId).collection("orders").doc(orderId)
+        : null;
+      const sellerOrderRef = sellerId
+        ? db.collection("users").doc(sellerId).collection("orders").doc(orderId)
+        : null;
 
       if (!sellerId) {
         throw httpError(400, "Order seller information is missing");
@@ -264,14 +272,18 @@ app.post("/orders/:orderId/status", async (req, res) => {
         };
       }
 
-      transaction.set(
-        orderRef,
-        {
-          status: nextStatus,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        },
-        { merge: true }
-      );
+      const orderStatusPayload = {
+        status: nextStatus,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      transaction.set(orderRef, orderStatusPayload, { merge: true });
+      if (buyerOrderRef) {
+        transaction.set(buyerOrderRef, orderStatusPayload, { merge: true });
+      }
+      if (sellerOrderRef) {
+        transaction.set(sellerOrderRef, orderStatusPayload, { merge: true });
+      }
 
       if (shouldRestockInventory(currentStatus, nextStatus) && productId) {
         const productRef = db.collection("products").doc(productId);
@@ -336,6 +348,42 @@ app.post("/orders/:orderId/status", async (req, res) => {
   }
 });
 
+app.get("/orders/buyer", async (req, res) => {
+  try {
+    const decodedToken = await requireAuth(req);
+    const orders = await fetchOrdersForActor({
+      primaryField: "buyerId",
+      fallbackField: "buyerUid",
+      userId: decodedToken.uid,
+      includeUserScopedCollection: true
+    });
+
+    return res.json({ orders });
+  } catch (error) {
+    console.error("Failed to load buyer orders", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({ error: error?.message || "Internal server error" });
+  }
+});
+
+app.get("/orders/seller", async (req, res) => {
+  try {
+    const decodedToken = await requireAuth(req);
+    const orders = await fetchOrdersForActor({
+      primaryField: "sellerId",
+      fallbackField: "sellerUid",
+      userId: decodedToken.uid,
+      includeUserScopedCollection: true
+    });
+
+    return res.json({ orders });
+  } catch (error) {
+    console.error("Failed to load seller orders", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({ error: error?.message || "Internal server error" });
+  }
+});
+
 const port = Number(process.env.PORT || 8080);
 app.listen(port, "0.0.0.0", () => {
   console.log(`UniMarket notification backend listening on port ${port}`);
@@ -371,6 +419,111 @@ async function requireAuth(req) {
   }
 
   return admin.auth().verifyIdToken(idToken);
+}
+
+async function fetchOrdersForActor({
+  primaryField,
+  fallbackField,
+  userId,
+  includeUserScopedCollection
+}) {
+  const mergedOrders = [];
+
+  mergedOrders.push(
+    ...(await fetchRootOrders(userId, primaryField, fallbackField))
+  );
+
+  if (includeUserScopedCollection) {
+    mergedOrders.push(...(await fetchUserScopedOrders(userId)));
+  }
+
+  return mergedOrders
+    .filter(Boolean)
+    .reduce((accumulator, order) => {
+      const key = order.documentPath || order.id;
+      if (!accumulator.some((item) => (item.documentPath || item.id) === key)) {
+        accumulator.push(order);
+      }
+      return accumulator;
+    }, [])
+    .sort((left, right) => Math.max(right.updatedAt, right.createdAt) - Math.max(left.updatedAt, left.createdAt));
+}
+
+async function fetchRootOrders(userId, primaryField, fallbackField) {
+  const documents = [];
+
+  const primarySnapshot = await db.collection("orders").whereEqualTo(primaryField, userId).get();
+  primarySnapshot.forEach((document) => documents.push(document));
+
+  const fallbackSnapshot = await db.collection("orders").whereEqualTo(fallbackField, userId).get();
+  fallbackSnapshot.forEach((document) => documents.push(document));
+
+  return documents
+    .filter((document, index, collection) =>
+      collection.findIndex((candidate) => candidate.ref.path === document.ref.path) === index
+    )
+    .map(mapOrderDocument)
+    .filter(Boolean);
+}
+
+async function fetchUserScopedOrders(userId) {
+  const snapshot = await db.collection("users").doc(userId).collection("orders").get();
+  return snapshot.docs.map(mapOrderDocument).filter(Boolean);
+}
+
+function mapOrderDocument(document) {
+  try {
+    const order = document.data() || {};
+    const rawStatus = typeof order.status === "string" ? order.status : "";
+    const normalizedStatus = normalizeOrderStatus(rawStatus) || rawStatus || "UNKNOWN";
+
+    return {
+      id: document.id,
+      documentPath: document.ref.path,
+      buyerId: typeof order.buyerId === "string" ? order.buyerId : "",
+      buyerName: typeof order.buyerName === "string" ? order.buyerName : "",
+      sellerId: typeof order.sellerId === "string" ? order.sellerId : "",
+      sellerName: typeof order.sellerName === "string" ? order.sellerName : "",
+      productId: typeof order.productId === "string" ? order.productId : "",
+      productName: typeof order.productName === "string" ? order.productName : "",
+      productDetail: typeof order.productDetail === "string" ? order.productDetail : "",
+      productImageUrl: typeof order.productImageUrl === "string" ? order.productImageUrl : "",
+      quantity: Number.isFinite(Number(order.quantity)) ? Number(order.quantity) : 1,
+      unitPrice: Number.isFinite(Number(order.unitPrice)) ? Number(order.unitPrice) : 0,
+      totalAmount: Number.isFinite(Number(order.total)) ? Number(order.total) : 0,
+      deliveryMethod: typeof order.deliveryMethod === "string" ? order.deliveryMethod : "",
+      paymentMethod: typeof order.paymentMethod === "string" ? order.paymentMethod : "",
+      meetingPoint: typeof order.meetingPoint === "string" ? order.meetingPoint : "",
+      buyerAddress: mapAddressPayload(order.buyerAddress),
+      sellerAddress: mapAddressPayload(order.sellerAddress),
+      status: normalizedStatus,
+      statusLabel: toDisplayStatus(normalizedStatus),
+      createdAt: toMillis(order.createdAt),
+      updatedAt: toMillis(order.updatedAt)
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function mapAddressPayload(value) {
+  if (!value || typeof value !== "object") return null;
+
+  return {
+    id: typeof value.id === "string" ? value.id : "",
+    recipientName: typeof value.recipientName === "string" ? value.recipientName : "",
+    phoneNumber: typeof value.phoneNumber === "string" ? value.phoneNumber : "",
+    addressLine: typeof value.addressLine === "string" ? value.addressLine : "",
+    isDefault: Boolean(value.isDefault)
+  };
+}
+
+function toMillis(value) {
+  if (value && typeof value.toMillis === "function") return value.toMillis();
+  if (value && typeof value.toDate === "function") return value.toDate().getTime();
+
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : 0;
 }
 
 function normalizePurchaseRequest(body) {
