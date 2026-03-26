@@ -452,10 +452,10 @@ async function fetchOrdersForActor({
 async function fetchRootOrders(userId, primaryField, fallbackField) {
   const documents = [];
 
-  const primarySnapshot = await db.collection("orders").whereEqualTo(primaryField, userId).get();
+  const primarySnapshot = await db.collection("orders").where(primaryField, "==", userId).get();
   primarySnapshot.forEach((document) => documents.push(document));
 
-  const fallbackSnapshot = await db.collection("orders").whereEqualTo(fallbackField, userId).get();
+  const fallbackSnapshot = await db.collection("orders").where(fallbackField, "==", userId).get();
   fallbackSnapshot.forEach((document) => documents.push(document));
 
   return documents
