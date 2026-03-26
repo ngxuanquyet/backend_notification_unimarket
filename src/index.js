@@ -352,6 +352,7 @@ app.get("/orders/buyer", async (req, res) => {
   try {
     const decodedToken = await requireAuth(req);
     const orders = await fetchOrdersForActor({
+      actorField: "buyerId",
       primaryField: "buyerId",
       fallbackField: "buyerUid",
       userId: decodedToken.uid,
@@ -370,6 +371,7 @@ app.get("/orders/seller", async (req, res) => {
   try {
     const decodedToken = await requireAuth(req);
     const orders = await fetchOrdersForActor({
+      actorField: "sellerId",
       primaryField: "sellerId",
       fallbackField: "sellerUid",
       userId: decodedToken.uid,
@@ -422,6 +424,7 @@ async function requireAuth(req) {
 }
 
 async function fetchOrdersForActor({
+  actorField,
   primaryField,
   fallbackField,
   userId,
@@ -430,15 +433,16 @@ async function fetchOrdersForActor({
   const mergedOrders = [];
 
   mergedOrders.push(
-    ...(await fetchRootOrders(userId, primaryField, fallbackField))
+    ...(await fetchRootOrders(userId, primaryField, fallbackField, actorField))
   );
 
   if (includeUserScopedCollection) {
-    mergedOrders.push(...(await fetchUserScopedOrders(userId)));
+    mergedOrders.push(...(await fetchUserScopedOrders(userId, actorField)));
   }
 
   return mergedOrders
     .filter(Boolean)
+    .filter((order) => normalizeActorId(order?.[actorField]) === userId)
     .reduce((accumulator, order) => {
       const key = order.id || order.documentPath;
       const existingIndex = accumulator.findIndex((item) => (item.id || item.documentPath) === key);
@@ -458,7 +462,7 @@ async function fetchOrdersForActor({
     .sort((left, right) => Math.max(right.updatedAt, right.createdAt) - Math.max(left.updatedAt, left.createdAt));
 }
 
-async function fetchRootOrders(userId, primaryField, fallbackField) {
+async function fetchRootOrders(userId, primaryField, fallbackField, actorField) {
   const documents = [];
 
   const primarySnapshot = await db.collection("orders").where(primaryField, "==", userId).get();
@@ -472,12 +476,16 @@ async function fetchRootOrders(userId, primaryField, fallbackField) {
       collection.findIndex((candidate) => candidate.ref.path === document.ref.path) === index
     )
     .map(mapOrderDocument)
+    .filter((order) => normalizeActorId(order?.[actorField]) === userId)
     .filter(Boolean);
 }
 
-async function fetchUserScopedOrders(userId) {
+async function fetchUserScopedOrders(userId, actorField) {
   const snapshot = await db.collection("users").doc(userId).collection("orders").get();
-  return snapshot.docs.map(mapOrderDocument).filter(Boolean);
+  return snapshot.docs
+    .map(mapOrderDocument)
+    .filter((order) => normalizeActorId(order?.[actorField]) === userId)
+    .filter(Boolean);
 }
 
 function mapOrderDocument(document) {
@@ -533,6 +541,10 @@ function toMillis(value) {
 
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : 0;
+}
+
+function normalizeActorId(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function normalizePurchaseRequest(body) {
