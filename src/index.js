@@ -683,23 +683,13 @@ function nextStatusForOrder({
 }) {
   switch (currentStatus) {
     case "WAITING_CONFIRMATION":
-      switch ((deliveryMethod || "").trim().toUpperCase()) {
-        case "DIRECT_MEET":
-        case "BUYER_TO_SELLER":
-          return "WAITING_PICKUP";
-        case "SELLER_TO_BUYER":
-          return "OUT_FOR_DELIVERY";
-        case "SHIPPING":
-          return "SHIPPING";
-        default:
-          return "WAITING_PICKUP";
-      }
+      return "WAITING_PICKUP";
     case "WAITING_PICKUP":
-      return "DELIVERED";
+      return "SHIPPING";
     case "SHIPPING":
-      return "IN_TRANSIT";
+      return "DELIVERED";
     case "IN_TRANSIT":
-      return "OUT_FOR_DELIVERY";
+      return "DELIVERED";
     case "OUT_FOR_DELIVERY":
       return "DELIVERED";
     default:
@@ -770,8 +760,8 @@ function buildBuyerOrderStatusNotification({
   switch (status) {
     case "WAITING_PICKUP":
       return {
-        title: "Order ready for pickup",
-        body: `${itemName} is ready for pickup from ${storeName}.`,
+        title: "Order confirmed",
+        body: `${storeName} confirmed your order for ${itemName}.`,
         data: {
           type: "order_status_updated",
           orderId,
@@ -780,8 +770,8 @@ function buildBuyerOrderStatusNotification({
       };
     case "SHIPPING":
       return {
-        title: "Order shipped",
-        body: `${itemName} has been handed to the carrier by ${storeName}.`,
+        title: "Delivery started",
+        body: `${itemName} is on the way from ${storeName}.`,
         data: {
           type: "order_status_updated",
           orderId,
