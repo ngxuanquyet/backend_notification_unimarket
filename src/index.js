@@ -145,6 +145,7 @@ app.post("/checkout/buy-now", async (req, res) => {
         deliveryFee,
         total,
         paymentMethod: purchase.paymentMethod,
+        paymentMethodDetails: purchase.paymentMethodDetails || null,
         deliveryMethod: purchase.deliveryMethod,
         meetingPoint: purchase.meetingPoint || "",
         buyerAddress: purchase.buyerAddress || null,
@@ -510,6 +511,7 @@ function mapOrderDocument(document) {
       totalAmount: Number.isFinite(Number(order.total)) ? Number(order.total) : 0,
       deliveryMethod: typeof order.deliveryMethod === "string" ? order.deliveryMethod : "",
       paymentMethod: typeof order.paymentMethod === "string" ? order.paymentMethod : "",
+      paymentMethodDetails: normalizePaymentMethod(order.paymentMethodDetails),
       meetingPoint: typeof order.meetingPoint === "string" ? order.meetingPoint : "",
       buyerAddress: mapAddressPayload(order.buyerAddress),
       sellerAddress: mapAddressPayload(order.sellerAddress),
@@ -553,6 +555,7 @@ function normalizePurchaseRequest(body) {
     quantity: Number(body.quantity || 0),
     deliveryMethod: typeof body.deliveryMethod === "string" ? body.deliveryMethod.trim() : "",
     paymentMethod: typeof body.paymentMethod === "string" ? body.paymentMethod.trim() : "",
+    paymentMethodDetails: normalizePaymentMethod(body.paymentMethodDetails),
     meetingPoint: typeof body.meetingPoint === "string" ? body.meetingPoint.trim() : "",
     buyerAddress: normalizeAddress(body.buyerAddress),
     sellerAddress: normalizeAddress(body.sellerAddress)
@@ -576,6 +579,25 @@ function normalizeAddress(address) {
     phoneNumber: typeof address.phoneNumber === "string" ? address.phoneNumber.trim() : "",
     addressLine: typeof address.addressLine === "string" ? address.addressLine.trim() : "",
     isDefault: Boolean(address.isDefault)
+  };
+}
+
+function normalizePaymentMethod(method) {
+  if (!method || typeof method !== "object") {
+    return null;
+  }
+
+  return {
+    id: typeof method.id === "string" ? method.id.trim() : "",
+    type: typeof method.type === "string" ? method.type.trim() : "",
+    label: typeof method.label === "string" ? method.label.trim() : "",
+    accountName: typeof method.accountName === "string" ? method.accountName.trim() : "",
+    accountNumber: typeof method.accountNumber === "string" ? method.accountNumber.trim() : "",
+    bankCode: typeof method.bankCode === "string" ? method.bankCode.trim().toLowerCase() : "",
+    bankName: typeof method.bankName === "string" ? method.bankName.trim() : "",
+    phoneNumber: typeof method.phoneNumber === "string" ? method.phoneNumber.trim() : "",
+    note: typeof method.note === "string" ? method.note.trim() : "",
+    isDefault: Boolean(method.isDefault)
   };
 }
 
