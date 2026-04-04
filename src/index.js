@@ -89,6 +89,7 @@ app.post("/checkout/buy-now", async (req, res) => {
     const decodedToken = await requireAuth(req);
     const buyerId = decodedToken.uid;
     const purchase = normalizePurchaseRequest(req.body || {});
+    const isTransferPayment = isTransferPaymentMethod(purchase.paymentMethod);
 
     const result = await db.runTransaction(async (transaction) => {
       const productRef = db.collection("products").doc(purchase.productId);
@@ -123,13 +124,17 @@ app.post("/checkout/buy-now", async (req, res) => {
       const deliveryFee = purchase.deliveryMethod === "SHIPPING" ? SHIPPING_FEE : 0;
       const subtotal = unitPrice * purchase.quantity;
       const total = subtotal + PLATFORM_FEE + deliveryFee;
+      const transferContent = isTransferPayment ? buildTransferContent(orderRef.id) : "";
+      const paymentExpiresAt = isTransferPayment
+        ? Date.now() + TRANSFER_PAYMENT_WINDOW_MS
+        : null;
       const sellerRef = db.collection("users").doc(sellerId);
       const buyerOrderRef = buyerRef.collection("orders").doc(orderRef.id);
       const sellerOrderRef = sellerRef.collection("orders").doc(orderRef.id);
       const orderPayload = {
         orderId: orderRef.id,
         source: "buy_now",
-        status: "WAITING_CONFIRMATION",
+        status: isTransferPayment ? "WAITING_PAYMENT" : "WAITING_CONFIRMATION",
         buyerId,
         buyerName: decodedToken.name || decodedToken.email || "Student Buyer",
         sellerId,
@@ -150,6 +155,9 @@ app.post("/checkout/buy-now", async (req, res) => {
         meetingPoint: purchase.meetingPoint || "",
         buyerAddress: purchase.buyerAddress || null,
         sellerAddress: purchase.sellerAddress || null,
+        transferContent,
+        paymentExpiresAt,
+        paymentConfirmedAt: null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
@@ -165,40 +173,45 @@ app.post("/checkout/buy-now", async (req, res) => {
         },
         { merge: true }
       );
-      transaction.set(
-        buyerRef,
-        {
-          boughtCount: admin.firestore.FieldValue.increment(1)
-        },
-        { merge: true }
-      );
-      transaction.set(
-        sellerRef,
-        {
-          soldCount: admin.firestore.FieldValue.increment(1)
-        },
-        { merge: true }
-      );
+      if (!isTransferPayment) {
+        transaction.set(
+          buyerRef,
+          {
+            boughtCount: admin.firestore.FieldValue.increment(1)
+          },
+          { merge: true }
+        );
+        transaction.set(
+          sellerRef,
+          {
+            soldCount: admin.firestore.FieldValue.increment(1)
+          },
+          { merge: true }
+        );
+      }
 
       return {
         orderId: orderRef.id,
         remainingQuantity,
         sellerId,
         buyerName: decodedToken.name || decodedToken.email || "Student Buyer",
-        productName
+        productName,
+        requiresTransferPayment: isTransferPayment
       };
     });
 
-    await runBestEffort(async () => {
-      await sendNotificationToUser(result.sellerId, {
-        title: "New order received",
-        body: `${result.buyerName} placed an order for ${result.productName || "your item"}.`,
-        data: {
-          type: "order_created",
-          orderId: result.orderId
-        }
-      });
-    }, "Failed to send new order notification");
+    if (!result.requiresTransferPayment) {
+      await runBestEffort(async () => {
+        await sendNotificationToUser(result.sellerId, {
+          title: "New order received",
+          body: `${result.buyerName} placed an order for ${result.productName || "your item"}.`,
+          data: {
+            type: "order_created",
+            orderId: result.orderId
+          }
+        });
+      }, "Failed to send new order notification");
+    }
 
     return res.json(result);
   } catch (error) {
@@ -344,6 +357,125 @@ app.post("/orders/:orderId/status", async (req, res) => {
     });
   } catch (error) {
     console.error("Failed to update order status", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({ error: error?.message || "Internal server error" });
+  }
+});
+
+app.post("/orders/:orderId/payment/check", async (req, res) => {
+  try {
+    const decodedToken = await requireAuth(req);
+    const buyerId = decodedToken.uid;
+    const orderId = typeof req.params.orderId === "string" ? req.params.orderId.trim() : "";
+
+    if (!orderId) {
+      throw httpError(400, "orderId is required");
+    }
+
+    const orderRef = db.collection("orders").doc(orderId);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) {
+      throw httpError(404, "Order not found");
+    }
+
+    const order = orderSnap.data() || {};
+    const orderBuyerId = normalizeActorId(order.buyerId);
+    if (!orderBuyerId) {
+      throw httpError(400, "Order buyer information is missing");
+    }
+    if (orderBuyerId !== buyerId) {
+      throw httpError(403, "You can only check payment for your own orders");
+    }
+
+    const normalizedStatus = normalizeOrderStatus(order.status);
+    if (!isTransferPaymentMethod(order.paymentMethod)) {
+      return res.json({
+        ok: true,
+        orderId,
+        status: normalizedStatus || "WAITING_CONFIRMATION",
+        statusLabel: toDisplayStatus(normalizedStatus || "WAITING_CONFIRMATION"),
+        paymentConfirmedAt: toMillis(order.paymentConfirmedAt),
+        paymentExpiresAt: toMillis(order.paymentExpiresAt)
+      });
+    }
+
+    if (normalizedStatus === "WAITING_PAYMENT" && isPendingPaymentExpired(order)) {
+      const cancelledOrder = await expirePendingTransferOrder({ orderId, order });
+      return res.json({
+        ok: true,
+        orderId,
+        status: cancelledOrder.status,
+        statusLabel: toDisplayStatus(cancelledOrder.status),
+        paymentConfirmedAt: 0,
+        paymentExpiresAt: cancelledOrder.paymentExpiresAt
+      });
+    }
+
+    if (normalizedStatus && normalizedStatus !== "WAITING_PAYMENT") {
+      return res.json({
+        ok: true,
+        orderId,
+        status: normalizedStatus,
+        statusLabel: toDisplayStatus(normalizedStatus),
+        paymentConfirmedAt: toMillis(order.paymentConfirmedAt),
+        paymentExpiresAt: toMillis(order.paymentExpiresAt)
+      });
+    }
+
+    const paymentMatch = await findMatchingTransferPayment({ orderId, order });
+    if (!paymentMatch) {
+      return res.json({
+        ok: true,
+        orderId,
+        status: "WAITING_PAYMENT",
+        statusLabel: toDisplayStatus("WAITING_PAYMENT"),
+        paymentConfirmedAt: 0,
+        paymentExpiresAt: toMillis(order.paymentExpiresAt)
+      });
+    }
+
+    const result = await confirmTransferPayment({
+      orderId,
+      order,
+      paymentMatch
+    });
+
+    if (result.wasChanged) {
+      await runBestEffort(async () => {
+        await sendNotificationToUser(result.sellerId, {
+          title: "Payment received",
+          body: `${result.buyerName} completed payment for ${result.productName || "your item"}.`,
+          data: {
+            type: "order_paid",
+            orderId: result.orderId,
+            status: result.status
+          }
+        });
+      }, "Failed to send seller payment notification");
+
+      await runBestEffort(async () => {
+        await sendNotificationToUser(result.buyerId, {
+          title: "Payment confirmed",
+          body: `Your transfer for ${result.productName || "your order"} has been verified.`,
+          data: {
+            type: "payment_confirmed",
+            orderId: result.orderId,
+            status: result.status
+          }
+        });
+      }, "Failed to send buyer payment notification");
+    }
+
+    return res.json({
+      ok: true,
+      orderId: result.orderId,
+      status: result.status,
+      statusLabel: toDisplayStatus(result.status),
+      paymentConfirmedAt: result.paymentConfirmedAt,
+      paymentExpiresAt: result.paymentExpiresAt
+    });
+  } catch (error) {
+    console.error("Failed to check transfer payment", error);
     const status = Number(error?.status) || 500;
     return res.status(status).json({ error: error?.message || "Internal server error" });
   }
@@ -515,6 +647,9 @@ function mapOrderDocument(document) {
       meetingPoint: typeof order.meetingPoint === "string" ? order.meetingPoint : "",
       buyerAddress: mapAddressPayload(order.buyerAddress),
       sellerAddress: mapAddressPayload(order.sellerAddress),
+      transferContent: typeof order.transferContent === "string" ? order.transferContent : "",
+      paymentExpiresAt: toMillis(order.paymentExpiresAt),
+      paymentConfirmedAt: toMillis(order.paymentConfirmedAt),
       status: normalizedStatus,
       statusLabel: toDisplayStatus(normalizedStatus),
       createdAt: toMillis(order.createdAt),
@@ -733,6 +868,11 @@ function normalizeOrderStatus(rawStatus) {
     : "";
 
   switch (normalized) {
+    case "WAITING_PAYMENT":
+    case "WAIT_FOR_PAYMENT":
+    case "PENDING_PAYMENT":
+    case "AWAITING_PAYMENT":
+      return "WAITING_PAYMENT";
     case "WAITING":
     case "WAITING_CONFIRMATION":
     case "WAIT_FOR_CONFIRMATION":
@@ -768,6 +908,278 @@ function normalizeOrderStatus(rawStatus) {
 
 function toDisplayStatus(status) {
   return (status || "UNKNOWN").replace(/_/g, " ");
+}
+
+function isTransferPaymentMethod(paymentMethod) {
+  const normalized = typeof paymentMethod === "string"
+    ? paymentMethod.trim().toUpperCase()
+    : "";
+  return normalized === "BANK_TRANSFER" || normalized === "MOMO";
+}
+
+function buildTransferContent(orderId) {
+  return `UM${orderId}`;
+}
+
+function isPendingPaymentExpired(order) {
+  const paymentExpiresAt = toMillis(order?.paymentExpiresAt);
+  return paymentExpiresAt > 0 && Date.now() >= paymentExpiresAt;
+}
+
+async function expirePendingTransferOrder({ orderId, order }) {
+  const buyerId = normalizeActorId(order.buyerId);
+  const sellerId = normalizeActorId(order.sellerId);
+  const productId = typeof order.productId === "string" ? order.productId.trim() : "";
+  const quantity = Number.isFinite(Number(order.quantity)) && Number(order.quantity) > 0
+    ? Number(order.quantity)
+    : 1;
+  const paymentExpiresAt = toMillis(order.paymentExpiresAt);
+
+  return db.runTransaction(async (transaction) => {
+    const orderRef = db.collection("orders").doc(orderId);
+    const latestOrderSnap = await transaction.get(orderRef);
+    if (!latestOrderSnap.exists) {
+      throw httpError(404, "Order not found");
+    }
+
+    const latestOrder = latestOrderSnap.data() || {};
+    const currentStatus = normalizeOrderStatus(latestOrder.status);
+    if (currentStatus && currentStatus !== "WAITING_PAYMENT") {
+      return {
+        status: currentStatus,
+        paymentExpiresAt: toMillis(latestOrder.paymentExpiresAt)
+      };
+    }
+
+    const orderStatusPayload = {
+      status: "CANCELLED",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    transaction.set(orderRef, orderStatusPayload, { merge: true });
+    if (buyerId) {
+      transaction.set(
+        db.collection("users").doc(buyerId).collection("orders").doc(orderId),
+        orderStatusPayload,
+        { merge: true }
+      );
+    }
+    if (sellerId) {
+      transaction.set(
+        db.collection("users").doc(sellerId).collection("orders").doc(orderId),
+        orderStatusPayload,
+        { merge: true }
+      );
+    }
+
+    if (productId) {
+      const productRef = db.collection("products").doc(productId);
+      const productSnap = await transaction.get(productRef);
+      if (productSnap.exists) {
+        const product = productSnap.data() || {};
+        const availableQuantity = Math.max(0, Number(product.quantityAvailable || 0));
+        transaction.set(
+          productRef,
+          {
+            quantityAvailable: availableQuantity + quantity,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        );
+      }
+    }
+
+    return {
+      status: "CANCELLED",
+      paymentExpiresAt
+    };
+  });
+}
+
+async function confirmTransferPayment({ orderId, order, paymentMatch }) {
+  const buyerId = normalizeActorId(order.buyerId);
+  const sellerId = normalizeActorId(order.sellerId);
+  const productName = typeof order.productName === "string" ? order.productName : "";
+  const buyerName = typeof order.buyerName === "string" ? order.buyerName : "Student Buyer";
+  const paymentExpiresAt = toMillis(order.paymentExpiresAt);
+
+  const result = await db.runTransaction(async (transaction) => {
+    const orderRef = db.collection("orders").doc(orderId);
+    const latestOrderSnap = await transaction.get(orderRef);
+    if (!latestOrderSnap.exists) {
+      throw httpError(404, "Order not found");
+    }
+
+    const latestOrder = latestOrderSnap.data() || {};
+    const currentStatus = normalizeOrderStatus(latestOrder.status);
+    if (!currentStatus) {
+      throw httpError(409, "Order has an unknown status");
+    }
+    if (currentStatus !== "WAITING_PAYMENT") {
+      return {
+        orderId,
+        buyerId,
+        sellerId,
+        buyerName,
+        productName,
+        status: currentStatus,
+        wasChanged: false,
+        paymentConfirmedAt: toMillis(latestOrder.paymentConfirmedAt),
+        paymentExpiresAt: toMillis(latestOrder.paymentExpiresAt)
+      };
+    }
+
+    const paymentConfirmedAt = admin.firestore.FieldValue.serverTimestamp();
+    const orderStatusPayload = {
+      status: "WAITING_CONFIRMATION",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      paymentConfirmedAt,
+      paymentTransactionId: paymentMatch.id || "",
+      paymentTransactionRef: paymentMatch.reference || ""
+    };
+
+    transaction.set(orderRef, orderStatusPayload, { merge: true });
+    if (buyerId) {
+      transaction.set(
+        db.collection("users").doc(buyerId).collection("orders").doc(orderId),
+        orderStatusPayload,
+        { merge: true }
+      );
+      transaction.set(
+        db.collection("users").doc(buyerId),
+        { boughtCount: admin.firestore.FieldValue.increment(1) },
+        { merge: true }
+      );
+    }
+    if (sellerId) {
+      transaction.set(
+        db.collection("users").doc(sellerId).collection("orders").doc(orderId),
+        orderStatusPayload,
+        { merge: true }
+      );
+      transaction.set(
+        db.collection("users").doc(sellerId),
+        { soldCount: admin.firestore.FieldValue.increment(1) },
+        { merge: true }
+      );
+    }
+
+    return {
+      orderId,
+      buyerId,
+      sellerId,
+      buyerName,
+      productName,
+      status: "WAITING_CONFIRMATION",
+      wasChanged: true,
+      paymentConfirmedAt: Date.now(),
+      paymentExpiresAt
+    };
+  });
+
+  return result;
+}
+
+async function findMatchingTransferPayment({ orderId, order }) {
+  const expectedContent = (
+    typeof order.transferContent === "string" && order.transferContent.trim()
+      ? order.transferContent
+      : buildTransferContent(orderId)
+  ).trim();
+  const expectedAmount = Number(order.total || order.totalAmount || 0);
+  const expectedAccount = normalizeAccountNumber(order?.paymentMethodDetails?.accountNumber);
+  const candidates = [];
+
+  for (const collectionName of TRANSFER_TRANSACTION_COLLECTIONS) {
+    for (const fieldName of TRANSFER_TRANSACTION_REFERENCE_FIELDS) {
+      let snapshot;
+      try {
+        snapshot = await db.collection(collectionName)
+          .where(fieldName, "==", expectedContent)
+          .limit(10)
+          .get();
+      } catch (_error) {
+        snapshot = null;
+      }
+
+      snapshot?.forEach((document) => {
+        candidates.push({
+          id: document.id,
+          path: document.ref.path,
+          ...normalizeTransferTransaction(document.data() || {})
+        });
+      });
+    }
+  }
+
+  const uniqueCandidates = candidates.filter((candidate, index, collection) =>
+    collection.findIndex((item) => item.path === candidate.path) === index
+  );
+
+  return uniqueCandidates.find((candidate) => {
+    if (!candidate.reference || candidate.reference !== expectedContent) {
+      return false;
+    }
+    if (candidate.status && !SUCCESSFUL_PAYMENT_STATUSES.includes(candidate.status)) {
+      return false;
+    }
+    if (expectedAmount > 0 && Math.abs(candidate.amount - expectedAmount) > 1) {
+      return false;
+    }
+    if (expectedAccount && candidate.receiverAccount && candidate.receiverAccount !== expectedAccount) {
+      return false;
+    }
+    return true;
+  }) || null;
+}
+
+function normalizeTransferTransaction(data) {
+  const rawStatus = typeof data.status === "string"
+    ? data.status
+    : typeof data.state === "string"
+      ? data.state
+      : typeof data.transactionStatus === "string"
+        ? data.transactionStatus
+        : "";
+
+  const rawReference = data.transferContent
+    || data.reference
+    || data.description
+    || data.content
+    || data.addInfo
+    || data.memo
+    || data.message
+    || data?.metadata?.transferContent
+    || data?.metadata?.reference
+    || "";
+
+  return {
+    amount: Number(
+      data.amount
+        || data.value
+        || data.totalAmount
+        || data.creditAmount
+        || data?.transaction?.amount
+        || 0
+    ),
+    receiverAccount: normalizeAccountNumber(
+      data.receiverAccount
+        || data.receiverAccountNumber
+        || data.accountNumber
+        || data.toAccountNumber
+        || data.creditAccount
+        || data?.receiver?.accountNumber
+        || data?.beneficiary?.accountNumber
+    ),
+    reference: typeof rawReference === "string" ? rawReference.trim() : "",
+    status: typeof rawStatus === "string" ? rawStatus.trim().toUpperCase() : ""
+  };
+}
+
+function normalizeAccountNumber(value) {
+  return typeof value === "string"
+    ? value.replace(/\s+/g, "").trim()
+    : "";
 }
 
 function buildBuyerOrderStatusNotification({
@@ -962,7 +1374,9 @@ function httpError(status, message) {
 
 const PLATFORM_FEE = 1500;
 const SHIPPING_FEE = 30000;
+const TRANSFER_PAYMENT_WINDOW_MS = 10 * 60 * 1000;
 const SUPPORTED_ORDER_STATUSES = [
+  "WAITING_PAYMENT",
   "WAITING_CONFIRMATION",
   "WAITING_PICKUP",
   "SHIPPING",
@@ -973,8 +1387,27 @@ const SUPPORTED_ORDER_STATUSES = [
 ];
 const TERMINAL_ORDER_STATUSES = ["DELIVERED", "CANCELLED"];
 const CANCELLABLE_ORDER_STATUSES = [
+  "WAITING_PAYMENT",
   "WAITING_CONFIRMATION",
   "WAITING_PICKUP",
   "SHIPPING",
   "IN_TRANSIT"
+];
+const TRANSFER_TRANSACTION_COLLECTIONS = [
+  "paymentTransactions",
+  "bankTransactions",
+  "transactions"
+];
+const TRANSFER_TRANSACTION_REFERENCE_FIELDS = [
+  "transferContent",
+  "reference",
+  "description",
+  "content",
+  "addInfo"
+];
+const SUCCESSFUL_PAYMENT_STATUSES = [
+  "SUCCESS",
+  "SUCCEEDED",
+  "COMPLETED",
+  "PAID"
 ];
