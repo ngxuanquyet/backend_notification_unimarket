@@ -26,9 +26,89 @@ const messaging = admin.messaging();
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.post("/webhooks/sepay", async (req, res) => {
+  try {
+    verifySePayWebhook(req);
+
+    const transaction = normalizeSePayWebhook(req.body || {});
+    if (!transaction.id) {
+      throw httpError(400, "Missing SePay transaction id");
+    }
+
+    const transactionDocId = `sepay_${transaction.id}`;
+    const transactionPayload = {
+      provider: "SEPAY",
+      providerTransactionId: transaction.id,
+      gateway: transaction.gateway,
+      transactionDate: transaction.transactionDate || "",
+      transactionTimestamp: transaction.transactionTimestamp || 0,
+      accountNumber: transaction.accountNumber,
+      receiverAccount: transaction.accountNumber,
+      code: transaction.code,
+      transferContent: transaction.transferContent,
+      reference: transaction.transferContent,
+      content: transaction.content,
+      addInfo: transaction.content,
+      description: transaction.description,
+      referenceCode: transaction.referenceCode,
+      transferType: transaction.transferType,
+      amount: transaction.amount,
+      transferAmount: transaction.amount,
+      accumulated: transaction.accumulated,
+      subAccount: transaction.subAccount,
+      status: transaction.status,
+      providerStatus: transaction.providerStatus,
+      raw: req.body || {},
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection("paymentTransactions").doc(transactionDocId).set(
+      transactionPayload,
+      { merge: true }
+    );
+
+    let matchedOrderId = "";
+    let matchedOrderStatus = "";
+
+    if (transaction.transferType === "IN" && transaction.transferContent) {
+      const matchedOrder = await findOrderByTransferContent(transaction.transferContent);
+      if (matchedOrder) {
+        const result = await confirmTransferPayment({
+          orderId: matchedOrder.id,
+          order: matchedOrder,
+          paymentMatch: {
+            id: transactionDocId,
+            reference: transaction.transferContent
+          }
+        });
+
+        await finalizeTransferPayment(result);
+        matchedOrderId = result.orderId;
+        matchedOrderStatus = result.status;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      transactionId: transactionDocId,
+      orderId: matchedOrderId || undefined,
+      status: matchedOrderStatus || undefined
+    });
+  } catch (error) {
+    console.error("Failed to process SePay webhook", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({
+      success: false,
+      error: error?.message || "Internal server error"
+    });
+  }
 });
 
 app.post("/notifications/chat", async (req, res) => {
@@ -440,31 +520,7 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
       paymentMatch
     });
 
-    if (result.wasChanged) {
-      await runBestEffort(async () => {
-        await sendNotificationToUser(result.sellerId, {
-          title: "Payment received",
-          body: `${result.buyerName} completed payment for ${result.productName || "your item"}.`,
-          data: {
-            type: "order_paid",
-            orderId: result.orderId,
-            status: result.status
-          }
-        });
-      }, "Failed to send seller payment notification");
-
-      await runBestEffort(async () => {
-        await sendNotificationToUser(result.buyerId, {
-          title: "Payment confirmed",
-          body: `Your transfer for ${result.productName || "your order"} has been verified.`,
-          data: {
-            type: "payment_confirmed",
-            orderId: result.orderId,
-            status: result.status
-          }
-        });
-      }, "Failed to send buyer payment notification");
-    }
+    await finalizeTransferPayment(result);
 
     return res.json({
       ok: true,
@@ -544,6 +600,41 @@ function resolveServiceAccount() {
   }
 
   return JSON.parse(fs.readFileSync(absolutePath, "utf8"));
+}
+
+function verifySePayWebhook(req) {
+  const configuredApiKey = typeof process.env.SEPAY_WEBHOOK_API_KEY === "string"
+    ? process.env.SEPAY_WEBHOOK_API_KEY.trim()
+    : "";
+  const configuredSecretKey = typeof process.env.SEPAY_WEBHOOK_SECRET_KEY === "string"
+    ? process.env.SEPAY_WEBHOOK_SECRET_KEY.trim()
+    : "";
+
+  if (!configuredApiKey && !configuredSecretKey) {
+    return;
+  }
+
+  const authorizationHeader = typeof req.headers.authorization === "string"
+    ? req.headers.authorization.trim()
+    : "";
+  const secretHeader = typeof req.headers["x-secret-key"] === "string"
+    ? req.headers["x-secret-key"].trim()
+    : "";
+  const receivedApiKey = parseSePayApiKey(authorizationHeader);
+
+  if (configuredApiKey && receivedApiKey && receivedApiKey === configuredApiKey) {
+    return;
+  }
+  if (configuredSecretKey && secretHeader && secretHeader === configuredSecretKey) {
+    return;
+  }
+
+  throw httpError(401, "Unauthorized SePay webhook");
+}
+
+function parseSePayApiKey(headerValue) {
+  const match = /^Apikey\s+(.+)$/i.exec(headerValue || "");
+  return match ? match[1].trim() : "";
 }
 
 async function requireAuth(req) {
@@ -736,6 +827,68 @@ function normalizePaymentMethod(method) {
   };
 }
 
+function normalizeSePayWebhook(body) {
+  const code = normalizeTransferReference(firstNonBlankString(body.code));
+  const content = firstNonBlankString(body.content);
+  const description = firstNonBlankString(body.description);
+  const referenceCode = firstNonBlankString(body.referenceCode);
+  const transferType = firstNonBlankString(body.transferType)?.toUpperCase() || "";
+  const transferReference = (
+    code ||
+    extractTransferReference(content) ||
+    extractTransferReference(description) ||
+    extractTransferReference(referenceCode)
+  );
+
+  return {
+    id: firstNonBlankString(body.id)?.replace(/\s+/g, "") || "",
+    gateway: firstNonBlankString(body.gateway),
+    transactionDate: firstNonBlankString(body.transactionDate),
+    transactionTimestamp: parseSePayTransactionDate(body.transactionDate),
+    accountNumber: normalizeAccountNumber(body.accountNumber),
+    code,
+    content,
+    description,
+    referenceCode,
+    transferContent: transferReference,
+    transferType,
+    amount: toNumericAmount(body.transferAmount),
+    accumulated: toNumericAmount(body.accumulated),
+    subAccount: firstNonBlankString(body.subAccount),
+    providerStatus: firstNonBlankString(body.status, body.state, body.transactionStatus)?.toUpperCase() || "",
+    status: transferType === "IN"
+      ? "SUCCESS"
+      : firstNonBlankString(body.status, body.state, body.transactionStatus)?.toUpperCase() || "OUT"
+  };
+}
+
+function firstNonBlankString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return "";
+}
+
+function toNumericAmount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseSePayTransactionDate(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return 0;
+  }
+
+  const normalized = value.trim().replace(" ", "T");
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function validatePurchaseRequest({
   purchase,
   buyerId,
@@ -921,6 +1074,59 @@ function buildTransferContent(orderId) {
   return `UM${orderId}`;
 }
 
+function extractTransferReference(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const match = value.trim().match(/\bUM[A-Za-z0-9_-]+\b/i);
+  return match ? match[0].toUpperCase() : "";
+}
+
+function normalizeTransferReference(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+  return value.trim().toUpperCase();
+}
+
+async function findOrderByTransferContent(transferContent) {
+  const normalizedReference = typeof transferContent === "string"
+    ? transferContent.trim().toUpperCase()
+    : "";
+  if (!normalizedReference) {
+    return null;
+  }
+
+  const orderId = normalizedReference.startsWith("UM")
+    ? normalizedReference.slice(2)
+    : "";
+  if (orderId) {
+    const directOrderSnap = await db.collection("orders").doc(orderId).get();
+    if (directOrderSnap.exists) {
+      const directOrder = directOrderSnap.data() || {};
+      if (
+        normalizeOrderStatus(directOrder.status) === "WAITING_PAYMENT" &&
+        String(directOrder.transferContent || "").trim().toUpperCase() === normalizedReference
+      ) {
+        return { id: orderId, ...directOrder };
+      }
+    }
+  }
+
+  const snapshot = await db.collection("orders")
+    .where("transferContent", "==", normalizedReference)
+    .limit(5)
+    .get();
+
+  const match = snapshot.docs.find((document) => {
+    const order = document.data() || {};
+    return normalizeOrderStatus(order.status) === "WAITING_PAYMENT";
+  });
+
+  return match ? { id: match.id, ...(match.data() || {}) } : null;
+}
+
 function isPendingPaymentExpired(order) {
   const paymentExpiresAt = toMillis(order?.paymentExpiresAt);
   return paymentExpiresAt > 0 && Date.now() >= paymentExpiresAt;
@@ -1078,6 +1284,36 @@ async function confirmTransferPayment({ orderId, order, paymentMatch }) {
   });
 
   return result;
+}
+
+async function finalizeTransferPayment(result) {
+  if (!result?.wasChanged) {
+    return;
+  }
+
+  await runBestEffort(async () => {
+    await sendNotificationToUser(result.sellerId, {
+      title: "Payment received",
+      body: `${result.buyerName} completed payment for ${result.productName || "your item"}.`,
+      data: {
+        type: "order_paid",
+        orderId: result.orderId,
+        status: result.status
+      }
+    });
+  }, "Failed to send seller payment notification");
+
+  await runBestEffort(async () => {
+    await sendNotificationToUser(result.buyerId, {
+      title: "Payment confirmed",
+      body: `Your transfer for ${result.productName || "your order"} has been verified.`,
+      data: {
+        type: "payment_confirmed",
+        orderId: result.orderId,
+        status: result.status
+      }
+    });
+  }, "Failed to send buyer payment notification");
 }
 
 async function findMatchingTransferPayment({ orderId, order }) {
