@@ -1,5 +1,14 @@
 require("dotenv").config();
 
+console.log("[boot] UniMarket backend starting");
+console.log("[boot] Environment", {
+  nodeEnv: process.env.NODE_ENV || "",
+  port: process.env.PORT || "",
+  hasFirebaseProjectId: Boolean(process.env.FIREBASE_PROJECT_ID),
+  hasFirebaseServiceAccountJson: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON),
+  googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS || ""
+});
+
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
@@ -7,6 +16,7 @@ const fs = require("fs");
 const path = require("path");
 
 if (!admin.apps.length) {
+  console.log("[boot] Initializing Firebase Admin");
   const serviceAccount = resolveServiceAccount();
   const appOptions = serviceAccount
     ? {
@@ -18,6 +28,9 @@ if (!admin.apps.length) {
       };
 
   admin.initializeApp(appOptions);
+  console.log("[boot] Firebase Admin initialized", {
+    projectId: appOptions.projectId || ""
+  });
 }
 
 const app = express();
@@ -576,6 +589,7 @@ app.get("/orders/seller", async (req, res) => {
 });
 
 const port = Number(process.env.PORT || 8080);
+console.log("[boot] Starting HTTP server", { port });
 app.listen(port, "0.0.0.0", () => {
   console.log(`UniMarket notification backend listening on port ${port}`);
 });
