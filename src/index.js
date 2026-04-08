@@ -1240,6 +1240,7 @@ async function confirmTransferPayment({ orderId, order, paymentMatch }) {
       status: "WAITING_CONFIRMATION",
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       paymentConfirmedAt,
+      paymentExpiresAt: 0,
       paymentTransactionId: paymentMatch.id || "",
       paymentTransactionRef: paymentMatch.reference || ""
     };
@@ -1279,7 +1280,7 @@ async function confirmTransferPayment({ orderId, order, paymentMatch }) {
       status: "WAITING_CONFIRMATION",
       wasChanged: true,
       paymentConfirmedAt: Date.now(),
-      paymentExpiresAt
+      paymentExpiresAt: 0
     };
   });
 
