@@ -354,11 +354,13 @@ app.post("/orders/:orderId/status", async (req, res) => {
       const sellerOrderRef = sellerId
         ? db.collection("users").doc(sellerId).collection("orders").doc(orderId)
         : null;
+      const isBuyerConfirmingTransferPayment =
+        buyerId === actorId && nextStatus === "WAITING_CONFIRMATION";
 
       if (!sellerId) {
         throw httpError(400, "Order seller information is missing");
       }
-      if (sellerId !== actorId) {
+      if (sellerId !== actorId && !isBuyerConfirmingTransferPayment) {
         throw httpError(403, "You can only update your own orders");
       }
 
@@ -383,6 +385,11 @@ app.post("/orders/:orderId/status", async (req, res) => {
         status: nextStatus,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
+
+      if (isBuyerConfirmingTransferPayment) {
+        orderStatusPayload.paymentConfirmedAt = admin.firestore.FieldValue.serverTimestamp();
+        orderStatusPayload.paymentExpiresAt = 0;
+      }
 
       transaction.set(orderRef, orderStatusPayload, { merge: true });
       if (buyerOrderRef) {
