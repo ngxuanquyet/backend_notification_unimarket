@@ -41,6 +41,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+function logInfo(scope, message, data = {}) {
+  console.log(`[${scope}] ${message}`, data);
+}
+
+function logWarn(scope, message, data = {}) {
+  console.warn(`[${scope}] ${message}`, data);
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -50,6 +58,13 @@ app.post("/webhooks/sepay", async (req, res) => {
     verifySePayWebhook(req);
 
     const transaction = normalizeSePayWebhook(req.body || {});
+    logInfo("sepay-webhook", "Received webhook payload", {
+      transactionId: transaction.id,
+      transferType: transaction.transferType,
+      transferContent: transaction.transferContent,
+      amount: transaction.amount,
+      status: transaction.status
+    });
     if (!transaction.id) {
       throw httpError(400, "Missing SePay transaction id");
     }
@@ -92,6 +107,11 @@ app.post("/webhooks/sepay", async (req, res) => {
 
     if (transaction.transferType === "IN" && transaction.transferContent) {
       const matchedOrder = await findOrderByTransferContent(transaction.transferContent);
+      logInfo("sepay-webhook", "Matching order by transfer content", {
+        transferContent: transaction.transferContent,
+        matchedOrderId: matchedOrder?.id || "",
+        matchedOrderStatus: matchedOrder?.status || ""
+      });
       if (matchedOrder) {
         const result = await confirmTransferPayment({
           orderId: matchedOrder.id,
@@ -105,7 +125,17 @@ app.post("/webhooks/sepay", async (req, res) => {
         await finalizeTransferPayment(result);
         matchedOrderId = result.orderId;
         matchedOrderStatus = result.status;
+        logInfo("sepay-webhook", "Payment confirmation finished", {
+          orderId: matchedOrderId,
+          status: matchedOrderStatus,
+          wasChanged: Boolean(result.wasChanged)
+        });
       }
+    } else {
+      logInfo("sepay-webhook", "Skip matching because transfer is not inbound or missing content", {
+        transferType: transaction.transferType,
+        hasTransferContent: Boolean(transaction.transferContent)
+      });
     }
 
     return res.status(200).json({
@@ -320,6 +350,12 @@ app.post("/orders/:orderId/status", async (req, res) => {
     const actorId = decodedToken.uid;
     const orderId = typeof req.params.orderId === "string" ? req.params.orderId.trim() : "";
     const statusUpdate = normalizeOrderStatusUpdateRequest(req.body || {});
+    logInfo("order-status", "Status update requested", {
+      orderId,
+      actorId,
+      requestedStatus: req.body?.status,
+      normalizedStatus: statusUpdate.status
+    });
 
     if (!orderId) {
       throw httpError(400, "orderId is required");
@@ -356,6 +392,15 @@ app.post("/orders/:orderId/status", async (req, res) => {
         : null;
       const isBuyerConfirmingTransferPayment =
         buyerId === actorId && nextStatus === "WAITING_CONFIRMATION";
+      logInfo("order-status", "Loaded order for status update", {
+        orderId,
+        actorId,
+        buyerId,
+        sellerId,
+        currentStatus,
+        nextStatus,
+        isBuyerConfirmingTransferPayment
+      });
 
       if (!sellerId) {
         throw httpError(400, "Order seller information is missing");
@@ -371,6 +416,10 @@ app.post("/orders/:orderId/status", async (req, res) => {
       });
 
       if (currentStatus === nextStatus) {
+        logInfo("order-status", "No-op update because status unchanged", {
+          orderId,
+          status: currentStatus
+        });
         return {
           orderId,
           status: currentStatus,
@@ -450,6 +499,12 @@ app.post("/orders/:orderId/status", async (req, res) => {
       }, "Failed to send order status notification");
     }
 
+    logInfo("order-status", "Status update completed", {
+      orderId: result.orderId,
+      status: result.status,
+      wasChanged: Boolean(result.wasChanged)
+    });
+
     return res.json({
       ok: true,
       orderId: result.orderId,
@@ -467,6 +522,7 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
     const decodedToken = await requireAuth(req);
     const buyerId = decodedToken.uid;
     const orderId = typeof req.params.orderId === "string" ? req.params.orderId.trim() : "";
+    logInfo("payment-check", "Payment check requested", { orderId, buyerId });
 
     if (!orderId) {
       throw httpError(400, "orderId is required");
@@ -488,7 +544,19 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
     }
 
     const normalizedStatus = normalizeOrderStatus(order.status);
+    logInfo("payment-check", "Loaded order for payment check", {
+      orderId,
+      buyerId,
+      orderBuyerId,
+      currentStatus: normalizedStatus,
+      paymentMethod: order.paymentMethod,
+      paymentExpiresAt: toMillis(order.paymentExpiresAt)
+    });
     if (!isTransferPaymentMethod(order.paymentMethod)) {
+      logInfo("payment-check", "Skip transfer check because payment method is not transfer", {
+        orderId,
+        paymentMethod: order.paymentMethod
+      });
       return res.json({
         ok: true,
         orderId,
@@ -500,6 +568,7 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
     }
 
     if (normalizedStatus === "WAITING_PAYMENT" && isPendingPaymentExpired(order)) {
+      logWarn("payment-check", "Payment window expired; expiring order", { orderId });
       const cancelledOrder = await expirePendingTransferOrder({ orderId, order });
       return res.json({
         ok: true,
@@ -512,6 +581,10 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
     }
 
     if (normalizedStatus && normalizedStatus !== "WAITING_PAYMENT") {
+      logInfo("payment-check", "Order already moved out of WAITING_PAYMENT", {
+        orderId,
+        status: normalizedStatus
+      });
       return res.json({
         ok: true,
         orderId,
@@ -524,6 +597,11 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
 
     const paymentMatch = await findMatchingTransferPayment({ orderId, order });
     if (!paymentMatch) {
+      logInfo("payment-check", "No matching transfer payment found", {
+        orderId,
+        expectedTransferContent: order.transferContent || buildTransferContent(orderId),
+        expectedAmount: Number(order.total || order.totalAmount || 0)
+      });
       return res.json({
         ok: true,
         orderId,
@@ -534,6 +612,12 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
       });
     }
 
+    logInfo("payment-check", "Found matching transfer payment", {
+      orderId,
+      paymentMatchId: paymentMatch.id || "",
+      paymentMatchReference: paymentMatch.reference || "",
+      paymentMatchAmount: paymentMatch.amount || 0
+    });
     const result = await confirmTransferPayment({
       orderId,
       order,
@@ -541,6 +625,11 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
     });
 
     await finalizeTransferPayment(result);
+    logInfo("payment-check", "Payment check completed with confirmation", {
+      orderId: result.orderId,
+      status: result.status,
+      wasChanged: Boolean(result.wasChanged)
+    });
 
     return res.json({
       ok: true,
@@ -984,6 +1073,10 @@ function validateOrderStatusTransition({
     return;
   }
 
+  if (currentStatus === "WAITING_PAYMENT" && nextStatus === "WAITING_CONFIRMATION") {
+    return;
+  }
+
   if (TERMINAL_ORDER_STATUSES.includes(currentStatus)) {
     throw httpError(409, `Cannot update an order that is already ${toDisplayStatus(currentStatus)}`);
   }
@@ -1239,10 +1332,22 @@ async function confirmTransferPayment({ orderId, order, paymentMatch }) {
 
     const latestOrder = latestOrderSnap.data() || {};
     const currentStatus = normalizeOrderStatus(latestOrder.status);
+    logInfo("confirm-transfer", "Loaded latest order state", {
+      orderId,
+      currentStatus,
+      hasBuyerId: Boolean(buyerId),
+      hasSellerId: Boolean(sellerId),
+      paymentMatchId: paymentMatch?.id || "",
+      paymentMatchReference: paymentMatch?.reference || ""
+    });
     if (!currentStatus) {
       throw httpError(409, "Order has an unknown status");
     }
     if (currentStatus !== "WAITING_PAYMENT") {
+      logInfo("confirm-transfer", "Skip state transition because order is not WAITING_PAYMENT", {
+        orderId,
+        currentStatus
+      });
       return {
         orderId,
         buyerId,
@@ -1347,6 +1452,12 @@ async function findMatchingTransferPayment({ orderId, order }) {
   const expectedAmount = Number(order.total || order.totalAmount || 0);
   const expectedAccount = normalizeAccountNumber(order?.paymentMethodDetails?.accountNumber);
   const candidates = [];
+  logInfo("match-transfer", "Start finding transfer payment", {
+    orderId,
+    expectedContent,
+    expectedAmount,
+    expectedAccount
+  });
 
   for (const collectionName of TRANSFER_TRANSACTION_COLLECTIONS) {
     for (const fieldName of TRANSFER_TRANSACTION_REFERENCE_FIELDS) {
@@ -1373,8 +1484,7 @@ async function findMatchingTransferPayment({ orderId, order }) {
   const uniqueCandidates = candidates.filter((candidate, index, collection) =>
     collection.findIndex((item) => item.path === candidate.path) === index
   );
-
-  return uniqueCandidates.find((candidate) => {
+  const matchedCandidate = uniqueCandidates.find((candidate) => {
     if (!candidate.reference || candidate.reference !== expectedContent) {
       return false;
     }
@@ -1389,6 +1499,15 @@ async function findMatchingTransferPayment({ orderId, order }) {
     }
     return true;
   }) || null;
+
+  logInfo("match-transfer", "Finished matching transfer payment", {
+    orderId,
+    candidateCount: uniqueCandidates.length,
+    matchedTransactionId: matchedCandidate?.id || "",
+    matchedReference: matchedCandidate?.reference || ""
+  });
+
+  return matchedCandidate;
 }
 
 function normalizeTransferTransaction(data) {
