@@ -649,6 +649,7 @@ app.post("/orders/:orderId/payment/check", async (req, res) => {
 app.get("/orders/buyer", async (req, res) => {
   try {
     const decodedToken = await requireAuth(req);
+    await expireOverdueTransferOrdersForUser(decodedToken.uid);
     const orders = await fetchOrdersForActor({
       actorField: "buyerId",
       primaryField: "buyerId",
@@ -668,6 +669,7 @@ app.get("/orders/buyer", async (req, res) => {
 app.get("/orders/seller", async (req, res) => {
   try {
     const decodedToken = await requireAuth(req);
+    await expireOverdueTransferOrdersForUser(decodedToken.uid);
     const orders = await fetchOrdersForActor({
       actorField: "sellerId",
       primaryField: "sellerId",
@@ -688,6 +690,7 @@ const port = Number(process.env.PORT || 8080);
 console.log("[boot] Starting HTTP server", { port });
 app.listen(port, "0.0.0.0", () => {
   console.log(`UniMarket notification backend listening on port ${port}`);
+  startExpiredTransferOrderCleanupJob();
 });
 
 function resolveServiceAccount() {
@@ -1246,23 +1249,88 @@ function isPendingPaymentExpired(order) {
   return paymentExpiresAt > 0 && Date.now() >= paymentExpiresAt;
 }
 
+async function expireOverdueTransferOrdersForUser(userId) {
+  if (!userId) return;
+
+  const snapshot = await db.collection("users").doc(userId).collection("orders")
+    .where("status", "==", "WAITING_PAYMENT")
+    .get();
+
+  const expiredOrders = snapshot.docs
+    .map((document) => ({ id: document.id, ...(document.data() || {}) }))
+    .filter((order) => isPendingPaymentExpired(order));
+
+  if (expiredOrders.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    expiredOrders.map((order) =>
+      runBestEffort(
+        () => expirePendingTransferOrder({ orderId: order.id, order }),
+        `Failed to expire overdue transfer order ${order.id}`
+      )
+    )
+  );
+}
+
+async function expireOverdueTransferOrdersGlobally() {
+  const snapshot = await db.collection("orders")
+    .where("status", "==", "WAITING_PAYMENT")
+    .get();
+
+  const expiredOrders = snapshot.docs
+    .map((document) => ({ id: document.id, ...(document.data() || {}) }))
+    .filter((order) => isPendingPaymentExpired(order));
+
+  if (expiredOrders.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    expiredOrders.map((order) =>
+      runBestEffort(
+        () => expirePendingTransferOrder({ orderId: order.id, order }),
+        `Failed to expire overdue transfer order ${order.id}`
+      )
+    )
+  );
+}
+
+function startExpiredTransferOrderCleanupJob() {
+  runBestEffort(
+    () => expireOverdueTransferOrdersGlobally(),
+    "Initial expired transfer order cleanup failed"
+  );
+
+  setInterval(() => {
+    runBestEffort(
+      () => expireOverdueTransferOrdersGlobally(),
+      "Periodic expired transfer order cleanup failed"
+    );
+  }, EXPIRED_TRANSFER_ORDER_CLEANUP_INTERVAL_MS);
+}
+
 async function expirePendingTransferOrder({ orderId, order }) {
-  const buyerId = normalizeActorId(order.buyerId);
-  const sellerId = normalizeActorId(order.sellerId);
-  const productId = typeof order.productId === "string" ? order.productId.trim() : "";
-  const quantity = Number.isFinite(Number(order.quantity)) && Number(order.quantity) > 0
-    ? Number(order.quantity)
-    : 1;
-  const paymentExpiresAt = toMillis(order.paymentExpiresAt);
+  const paymentExpiresAt = toMillis(order?.paymentExpiresAt);
 
   return db.runTransaction(async (transaction) => {
     const orderRef = db.collection("orders").doc(orderId);
     const latestOrderSnap = await transaction.get(orderRef);
     if (!latestOrderSnap.exists) {
-      throw httpError(404, "Order not found");
+      return {
+        status: "CANCELLED",
+        paymentExpiresAt
+      };
     }
 
     const latestOrder = latestOrderSnap.data() || {};
+    const buyerId = normalizeActorId(latestOrder.buyerId);
+    const sellerId = normalizeActorId(latestOrder.sellerId);
+    const productId = typeof latestOrder.productId === "string" ? latestOrder.productId.trim() : "";
+    const quantity = Number.isFinite(Number(latestOrder.quantity)) && Number(latestOrder.quantity) > 0
+      ? Number(latestOrder.quantity)
+      : 1;
     const currentStatus = normalizeOrderStatus(latestOrder.status);
     if (currentStatus && currentStatus !== "WAITING_PAYMENT") {
       return {
@@ -1271,24 +1339,16 @@ async function expirePendingTransferOrder({ orderId, order }) {
       };
     }
 
-    const orderStatusPayload = {
-      status: "CANCELLED",
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    transaction.set(orderRef, orderStatusPayload, { merge: true });
+    // Remove expired unpaid order from all order collections.
+    transaction.delete(orderRef);
     if (buyerId) {
-      transaction.set(
-        db.collection("users").doc(buyerId).collection("orders").doc(orderId),
-        orderStatusPayload,
-        { merge: true }
+      transaction.delete(
+        db.collection("users").doc(buyerId).collection("orders").doc(orderId)
       );
     }
     if (sellerId) {
-      transaction.set(
-        db.collection("users").doc(sellerId).collection("orders").doc(orderId),
-        orderStatusPayload,
-        { merge: true }
+      transaction.delete(
+        db.collection("users").doc(sellerId).collection("orders").doc(orderId)
       );
     }
 
@@ -1973,6 +2033,7 @@ const SUCCESSFUL_PAYMENT_STATUSES = [
   "COMPLETED",
   "PAID"
 ];
+const EXPIRED_TRANSFER_ORDER_CLEANUP_INTERVAL_MS = 60 * 1000;
 const SEPAY_TRANSACTIONS_LIST_URL = "https://my.sepay.vn/userapi/transactions/list";
 const DEFAULT_SEPAY_CHECK_ACCOUNT_NUMBER = "0356433860";
 const DEFAULT_SEPAY_CHECK_LIMIT = 20;
