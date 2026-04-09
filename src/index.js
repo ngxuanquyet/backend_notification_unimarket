@@ -1444,14 +1444,14 @@ async function finalizeTransferPayment(result) {
 }
 
 async function findMatchingTransferPayment({ orderId, order }) {
-  const expectedContent = (
+  const rawExpectedContent = (
     typeof order.transferContent === "string" && order.transferContent.trim()
       ? order.transferContent
       : buildTransferContent(orderId)
   ).trim();
+  const expectedContent = normalizeTransferReference(rawExpectedContent);
   const expectedAmount = Number(order.total || order.totalAmount || 0);
   const expectedAccount = normalizeAccountNumber(order?.paymentMethodDetails?.accountNumber);
-  const candidates = [];
   logInfo("match-transfer", "Start finding transfer payment", {
     orderId,
     expectedContent,
@@ -1459,55 +1459,240 @@ async function findMatchingTransferPayment({ orderId, order }) {
     expectedAccount
   });
 
-  for (const collectionName of TRANSFER_TRANSACTION_COLLECTIONS) {
-    for (const fieldName of TRANSFER_TRANSACTION_REFERENCE_FIELDS) {
-      let snapshot;
-      try {
-        snapshot = await db.collection(collectionName)
-          .where(fieldName, "==", expectedContent)
-          .limit(10)
-          .get();
-      } catch (_error) {
-        snapshot = null;
-      }
+  const sepayCandidates = await fetchSePayTransactionsForPaymentCheck();
+  const matchedFromSePay = findMatchingCandidate({
+    orderId,
+    expectedContent,
+    expectedAmount,
+    expectedAccount,
+    candidates: sepayCandidates
+  });
 
-      snapshot?.forEach((document) => {
-        candidates.push({
-          id: document.id,
-          path: document.ref.path,
-          ...normalizeTransferTransaction(document.data() || {})
-        });
-      });
-    }
+  if (matchedFromSePay) {
+    await persistMatchedSePayTransaction(matchedFromSePay);
+    logInfo("match-transfer", "Matched payment from SePay transactions API", {
+      orderId,
+      sepayTransactionId: matchedFromSePay.providerTransactionId,
+      amount: matchedFromSePay.amount,
+      reference: matchedFromSePay.reference
+    });
+
+    return {
+      id: matchedFromSePay.id,
+      reference: matchedFromSePay.reference,
+      amount: matchedFromSePay.amount,
+      status: matchedFromSePay.status,
+      receiverAccount: matchedFromSePay.receiverAccount
+    };
   }
 
-  const uniqueCandidates = candidates.filter((candidate, index, collection) =>
-    collection.findIndex((item) => item.path === candidate.path) === index
-  );
-  const matchedCandidate = uniqueCandidates.find((candidate) => {
-    if (!candidate.reference || candidate.reference !== expectedContent) {
-      return false;
-    }
-    if (candidate.status && !SUCCESSFUL_PAYMENT_STATUSES.includes(candidate.status)) {
-      return false;
-    }
-    if (expectedAmount > 0 && Math.abs(candidate.amount - expectedAmount) > 1) {
-      return false;
-    }
-    if (expectedAccount && candidate.receiverAccount && candidate.receiverAccount !== expectedAccount) {
-      return false;
-    }
-    return true;
-  }) || null;
+  const fallbackCandidates = await findTransferCandidatesFromFirestore({
+    rawExpectedContent,
+    expectedContent
+  });
+  const matchedCandidate = findMatchingCandidate({
+    orderId,
+    expectedContent,
+    expectedAmount,
+    expectedAccount,
+    candidates: fallbackCandidates
+  });
 
   logInfo("match-transfer", "Finished matching transfer payment", {
     orderId,
-    candidateCount: uniqueCandidates.length,
+    candidateCount: sepayCandidates.length + fallbackCandidates.length,
     matchedTransactionId: matchedCandidate?.id || "",
     matchedReference: matchedCandidate?.reference || ""
   });
 
   return matchedCandidate;
+}
+
+async function fetchSePayTransactionsForPaymentCheck() {
+  const token = (
+    process.env.SEPAY_USER_API_TOKEN
+    || process.env.SEPAY_API_TOKEN
+    || process.env.SEPAY_TOKEN
+    || ""
+  ).trim();
+  if (!token) {
+    logWarn("match-transfer", "SePay API token is missing; skip direct transaction check");
+    return [];
+  }
+
+  const accountNumber = (process.env.SEPAY_CHECK_ACCOUNT_NUMBER || DEFAULT_SEPAY_CHECK_ACCOUNT_NUMBER).trim();
+  const limitRaw = Number(process.env.SEPAY_CHECK_LIMIT || DEFAULT_SEPAY_CHECK_LIMIT);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : DEFAULT_SEPAY_CHECK_LIMIT;
+  const url = `${SEPAY_TRANSACTIONS_LIST_URL}?${new URLSearchParams({
+    account_number: accountNumber,
+    limit: String(limit)
+  }).toString()}`;
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      logWarn("match-transfer", "SePay API request failed", {
+        status: response.status,
+        body: body.slice(0, 300)
+      });
+      return [];
+    }
+
+    const payload = await response.json();
+    const transactions = Array.isArray(payload?.transactions) ? payload.transactions : [];
+    const normalized = transactions.map((item) => normalizeSePayListTransaction(item)).filter(Boolean);
+    logInfo("match-transfer", "Fetched transactions from SePay API", {
+      accountNumber,
+      requestedLimit: limit,
+      receivedCount: normalized.length
+    });
+    return normalized;
+  } catch (error) {
+    logWarn("match-transfer", "Failed to call SePay transactions API", {
+      message: error?.message || String(error)
+    });
+    return [];
+  }
+}
+
+function normalizeSePayListTransaction(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  const providerTransactionId = firstNonBlankString(
+    item.id,
+    item.transaction_id,
+    item.transactionId,
+    item.reference_number,
+    item.referenceNumber
+  );
+  const referenceSource = firstNonBlankString(
+    item.transaction_content,
+    item.transactionContent,
+    item.content,
+    item.description,
+    item.addInfo,
+    item.code
+  );
+  const extractedReference = extractTransferReference(referenceSource) || normalizeTransferReference(item.code);
+  const amount = toNumericAmount(
+    item.amount_in
+    || item.amountIn
+    || item.amount
+    || item.transferAmount
+  );
+  const accountNumber = normalizeAccountNumber(
+    item.account_number
+    || item.accountNumber
+    || item.receiverAccount
+    || item.receiverAccountNumber
+  );
+
+  return {
+    id: providerTransactionId ? `sepay_poll_${providerTransactionId}` : "",
+    providerTransactionId,
+    reference: extractedReference,
+    amount,
+    receiverAccount: accountNumber,
+    status: "SUCCESS",
+    raw: item
+  };
+}
+
+async function persistMatchedSePayTransaction(candidate) {
+  if (!candidate?.id) {
+    return;
+  }
+
+  const payload = {
+    provider: "SEPAY",
+    providerTransactionId: candidate.providerTransactionId || "",
+    receiverAccount: candidate.receiverAccount || "",
+    transferContent: candidate.reference || "",
+    reference: candidate.reference || "",
+    amount: candidate.amount || 0,
+    transferAmount: candidate.amount || 0,
+    status: candidate.status || "SUCCESS",
+    providerStatus: candidate.status || "SUCCESS",
+    raw: candidate.raw || {},
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  await db.collection("paymentTransactions").doc(candidate.id).set(payload, { merge: true });
+}
+
+async function findTransferCandidatesFromFirestore({ rawExpectedContent, expectedContent }) {
+  const queryReferences = Array.from(new Set(
+    [rawExpectedContent, expectedContent].filter((value) => typeof value === "string" && value.trim())
+  ));
+  const candidates = [];
+
+  for (const collectionName of TRANSFER_TRANSACTION_COLLECTIONS) {
+    for (const fieldName of TRANSFER_TRANSACTION_REFERENCE_FIELDS) {
+      for (const queryReference of queryReferences) {
+        let snapshot;
+        try {
+          snapshot = await db.collection(collectionName)
+            .where(fieldName, "==", queryReference)
+            .limit(10)
+            .get();
+        } catch (_error) {
+          snapshot = null;
+        }
+
+        snapshot?.forEach((document) => {
+          candidates.push({
+            id: document.id,
+            path: document.ref.path,
+            ...normalizeTransferTransaction(document.data() || {})
+          });
+        });
+      }
+    }
+  }
+
+  return candidates.filter((candidate, index, collection) =>
+    collection.findIndex((item) => item.path === candidate.path) === index
+  );
+}
+
+function findMatchingCandidate({
+  orderId,
+  expectedContent,
+  expectedAmount,
+  expectedAccount,
+  candidates
+}) {
+  return (candidates || []).find((candidate) => {
+    if (!candidate.reference || normalizeTransferReference(candidate.reference) !== expectedContent) {
+      return false;
+    }
+    if (candidate.status && !SUCCESSFUL_PAYMENT_STATUSES.includes(candidate.status)) {
+      return false;
+    }
+    if (expectedAmount > 0 && Math.abs(Number(candidate.amount || 0) - expectedAmount) > 1) {
+      return false;
+    }
+    if (expectedAccount && candidate.receiverAccount && candidate.receiverAccount !== expectedAccount) {
+      logWarn("match-transfer", "Receiver account mismatch, but keeping candidate because reference+amount matched", {
+        orderId,
+        expectedAccount,
+        candidateReceiverAccount: candidate.receiverAccount,
+        candidateId: candidate.id || ""
+      });
+    }
+    return true;
+  }) || null;
 }
 
 function normalizeTransferTransaction(data) {
@@ -1548,7 +1733,7 @@ function normalizeTransferTransaction(data) {
         || data?.receiver?.accountNumber
         || data?.beneficiary?.accountNumber
     ),
-    reference: typeof rawReference === "string" ? rawReference.trim() : "",
+    reference: normalizeTransferReference(rawReference),
     status: typeof rawStatus === "string" ? rawStatus.trim().toUpperCase() : ""
   };
 }
@@ -1788,3 +1973,6 @@ const SUCCESSFUL_PAYMENT_STATUSES = [
   "COMPLETED",
   "PAID"
 ];
+const SEPAY_TRANSACTIONS_LIST_URL = "https://my.sepay.vn/userapi/transactions/list";
+const DEFAULT_SEPAY_CHECK_ACCOUNT_NUMBER = "035433860";
+const DEFAULT_SEPAY_CHECK_LIMIT = 20;
