@@ -669,7 +669,6 @@ app.get("/orders/buyer", async (req, res) => {
 app.get("/orders/seller", async (req, res) => {
   try {
     const decodedToken = await requireAuth(req);
-    await expireOverdueTransferOrdersForUser(decodedToken.uid);
     const orders = await fetchOrdersForActor({
       actorField: "sellerId",
       primaryField: "sellerId",
@@ -690,7 +689,6 @@ const port = Number(process.env.PORT || 8080);
 console.log("[boot] Starting HTTP server", { port });
 app.listen(port, "0.0.0.0", () => {
   console.log(`UniMarket notification backend listening on port ${port}`);
-  startExpiredTransferOrderCleanupJob();
 });
 
 function resolveServiceAccount() {
@@ -1251,9 +1249,16 @@ function isPendingPaymentExpired(order) {
 
 async function expireOverdueTransferOrdersForUser(userId) {
   if (!userId) return;
+  const now = Date.now();
+  const lastCleanupAt = expiredTransferCleanupByUser.get(userId) || 0;
+  if (now - lastCleanupAt < EXPIRED_TRANSFER_ORDER_CLEANUP_COOLDOWN_MS) {
+    return;
+  }
+  expiredTransferCleanupByUser.set(userId, now);
 
   const snapshot = await db.collection("users").doc(userId).collection("orders")
     .where("status", "==", "WAITING_PAYMENT")
+    .limit(MAX_PENDING_TRANSFER_ORDERS_PER_CLEANUP)
     .get();
 
   const expiredOrders = snapshot.docs
@@ -1272,43 +1277,6 @@ async function expireOverdueTransferOrdersForUser(userId) {
       )
     )
   );
-}
-
-async function expireOverdueTransferOrdersGlobally() {
-  const snapshot = await db.collection("orders")
-    .where("status", "==", "WAITING_PAYMENT")
-    .get();
-
-  const expiredOrders = snapshot.docs
-    .map((document) => ({ id: document.id, ...(document.data() || {}) }))
-    .filter((order) => isPendingPaymentExpired(order));
-
-  if (expiredOrders.length === 0) {
-    return;
-  }
-
-  await Promise.all(
-    expiredOrders.map((order) =>
-      runBestEffort(
-        () => expirePendingTransferOrder({ orderId: order.id, order }),
-        `Failed to expire overdue transfer order ${order.id}`
-      )
-    )
-  );
-}
-
-function startExpiredTransferOrderCleanupJob() {
-  runBestEffort(
-    () => expireOverdueTransferOrdersGlobally(),
-    "Initial expired transfer order cleanup failed"
-  );
-
-  setInterval(() => {
-    runBestEffort(
-      () => expireOverdueTransferOrdersGlobally(),
-      "Periodic expired transfer order cleanup failed"
-    );
-  }, EXPIRED_TRANSFER_ORDER_CLEANUP_INTERVAL_MS);
 }
 
 async function expirePendingTransferOrder({ orderId, order }) {
@@ -2033,7 +2001,9 @@ const SUCCESSFUL_PAYMENT_STATUSES = [
   "COMPLETED",
   "PAID"
 ];
-const EXPIRED_TRANSFER_ORDER_CLEANUP_INTERVAL_MS = 60 * 1000;
+const EXPIRED_TRANSFER_ORDER_CLEANUP_COOLDOWN_MS = 2 * 60 * 1000;
+const MAX_PENDING_TRANSFER_ORDERS_PER_CLEANUP = 20;
+const expiredTransferCleanupByUser = new Map();
 const SEPAY_TRANSACTIONS_LIST_URL = "https://my.sepay.vn/userapi/transactions/list";
 const DEFAULT_SEPAY_CHECK_ACCOUNT_NUMBER = "0356433860";
 const DEFAULT_SEPAY_CHECK_LIMIT = 20;
