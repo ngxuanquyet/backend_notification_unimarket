@@ -24,6 +24,31 @@ Thu muc `backend/` nay co the duoc tach ra thanh 1 repo GitHub rieng va deploy d
 5. Chay local:
    `npm run dev`
 
+## Cap quyen admin/moderator cho user (server-side)
+
+Flow dung:
+
+1. Tao user bang Firebase Authentication (email/password).
+2. Tu backend, gan custom claim cho user:
+
+   ```bash
+   npm run grant:admin -- --email admin@uni.com --role admin
+   ```
+
+   Hoac theo `uid`:
+
+   ```bash
+   npm run grant:admin -- --uid <firebase_uid> --role admin
+   ```
+
+3. Bat buoc user dang xuat va dang nhap lai de nhan token moi co claim.
+
+Xoa role:
+
+```bash
+npm run grant:admin -- --email admin@uni.com --role admin --remove
+```
+
 ## Bien moi truong
 
 - `PORT`: cong backend, mac dinh `8080`
