@@ -449,6 +449,20 @@ app.post("/orders/:orderId/status", async (req, res) => {
         orderStatusPayload.paymentExpiresAt = 0;
       }
 
+      let nextAvailableQuantity = null;
+      if (shouldRestockInventory(currentStatus, nextStatus) && productId) {
+        const productRef = db.collection("products").doc(productId);
+        const productSnap = await transaction.get(productRef);
+        if (productSnap.exists) {
+          const product = productSnap.data() || {};
+          const availableQuantity = Math.max(0, Number(product.quantityAvailable || 0));
+          nextAvailableQuantity = {
+            productRef,
+            value: availableQuantity + quantity
+          };
+        }
+      }
+
       transaction.set(orderRef, orderStatusPayload, { merge: true });
       if (buyerOrderRef) {
         transaction.set(buyerOrderRef, orderStatusPayload, { merge: true });
@@ -456,22 +470,15 @@ app.post("/orders/:orderId/status", async (req, res) => {
       if (sellerOrderRef) {
         transaction.set(sellerOrderRef, orderStatusPayload, { merge: true });
       }
-
-      if (shouldRestockInventory(currentStatus, nextStatus) && productId) {
-        const productRef = db.collection("products").doc(productId);
-        const productSnap = await transaction.get(productRef);
-        if (productSnap.exists) {
-          const product = productSnap.data() || {};
-          const availableQuantity = Math.max(0, Number(product.quantityAvailable || 0));
-          transaction.set(
-            productRef,
-            {
-              quantityAvailable: availableQuantity + quantity,
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            },
-            { merge: true }
-          );
-        }
+      if (nextAvailableQuantity) {
+        transaction.set(
+          nextAvailableQuantity.productRef,
+          {
+            quantityAvailable: nextAvailableQuantity.value,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        );
       }
 
       if (shouldRollbackCounters(currentStatus, nextStatus)) {
