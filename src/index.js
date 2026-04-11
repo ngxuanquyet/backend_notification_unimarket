@@ -392,6 +392,10 @@ app.post("/orders/:orderId/status", async (req, res) => {
         : null;
       const isBuyerConfirmingTransferPayment =
         buyerId === actorId && nextStatus === "WAITING_CONFIRMATION";
+      const isBuyerCancellingPendingPayment =
+        buyerId === actorId &&
+        currentStatus === "WAITING_PAYMENT" &&
+        nextStatus === "CANCELLED";
       logInfo("order-status", "Loaded order for status update", {
         orderId,
         actorId,
@@ -399,13 +403,18 @@ app.post("/orders/:orderId/status", async (req, res) => {
         sellerId,
         currentStatus,
         nextStatus,
-        isBuyerConfirmingTransferPayment
+        isBuyerConfirmingTransferPayment,
+        isBuyerCancellingPendingPayment
       });
 
       if (!sellerId) {
         throw httpError(400, "Order seller information is missing");
       }
-      if (sellerId !== actorId && !isBuyerConfirmingTransferPayment) {
+      if (
+        sellerId !== actorId &&
+        !isBuyerConfirmingTransferPayment &&
+        !isBuyerCancellingPendingPayment
+      ) {
         throw httpError(403, "You can only update your own orders");
       }
 
