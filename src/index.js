@@ -471,6 +471,29 @@ app.post("/orders/:orderId/status", async (req, res) => {
         }
       }
 
+      let sellerWalletCredit = null;
+      const shouldCreditWallet = shouldCreditSellerWallet(currentStatus, nextStatus);
+      if (shouldCreditWallet && sellerId && totalAmount > 0) {
+        const sellerUserRef = db.collection("users").doc(sellerId);
+        const sellerUserSnap = await transaction.get(sellerUserRef);
+        const sellerData = sellerUserSnap.data() || {};
+        const currentWalletBalance = Number(sellerData.walletBalance || 0);
+        sellerWalletCredit = {
+          sellerUserRef,
+          amount: totalAmount,
+          beforeBalance: currentWalletBalance,
+          afterBalance: currentWalletBalance + totalAmount
+        };
+      } else if (shouldCreditWallet) {
+        logWarn("wallet-credit", "Skip seller wallet credit due to missing data", {
+          orderId,
+          sellerId,
+          totalAmount,
+          currentStatus,
+          nextStatus
+        });
+      }
+
       transaction.set(orderRef, orderStatusPayload, { merge: true });
       if (buyerOrderRef) {
         transaction.set(buyerOrderRef, orderStatusPayload, { merge: true });
@@ -505,12 +528,21 @@ app.post("/orders/:orderId/status", async (req, res) => {
           );
         }
       }
-      if (shouldCreditSellerWallet(currentStatus, nextStatus) && sellerId && totalAmount > 0) {
+      if (sellerWalletCredit) {
         transaction.set(
-          db.collection("users").doc(sellerId),
-          { walletBalance: admin.firestore.FieldValue.increment(totalAmount) },
+          sellerWalletCredit.sellerUserRef,
+          { walletBalance: admin.firestore.FieldValue.increment(sellerWalletCredit.amount) },
           { merge: true }
         );
+        logInfo("wallet-credit", "Seller wallet credited", {
+          orderId,
+          sellerId,
+          amount: sellerWalletCredit.amount,
+          beforeBalance: sellerWalletCredit.beforeBalance,
+          afterBalance: sellerWalletCredit.afterBalance,
+          currentStatus,
+          nextStatus
+        });
       }
 
       return {
@@ -519,7 +551,10 @@ app.post("/orders/:orderId/status", async (req, res) => {
         buyerId,
         productName,
         sellerName,
-        wasChanged: true
+        wasChanged: true,
+        walletCreditedAmount: sellerWalletCredit?.amount || 0,
+        sellerWalletBalanceBefore: sellerWalletCredit?.beforeBalance ?? null,
+        sellerWalletBalanceAfter: sellerWalletCredit?.afterBalance ?? null
       };
     });
 
@@ -533,7 +568,10 @@ app.post("/orders/:orderId/status", async (req, res) => {
     logInfo("order-status", "Status update completed", {
       orderId: result.orderId,
       status: result.status,
-      wasChanged: Boolean(result.wasChanged)
+      wasChanged: Boolean(result.wasChanged),
+      walletCreditedAmount: result.walletCreditedAmount || 0,
+      sellerWalletBalanceBefore: result.sellerWalletBalanceBefore,
+      sellerWalletBalanceAfter: result.sellerWalletBalanceAfter
     });
 
     return res.json({
