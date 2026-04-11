@@ -754,6 +754,70 @@ app.get("/orders/seller", async (req, res) => {
   }
 });
 
+app.post("/admin/users/:uid/lock", async (req, res) => {
+  try {
+    const decodedToken = await requireAdminAuth(req);
+    const targetUid = typeof req.params.uid === "string" ? req.params.uid.trim() : "";
+    const disabled = Boolean(req.body?.disabled);
+
+    if (!targetUid) {
+      throw httpError(400, "uid is required");
+    }
+    if (targetUid === decodedToken.uid) {
+      throw httpError(400, "You cannot lock/unlock your own account");
+    }
+
+    await admin.auth().updateUser(targetUid, { disabled });
+    await db.collection("users").doc(targetUid).set(
+      {
+        isLock: disabled,
+        authDisabled: disabled,
+        accountStatus: disabled ? "LOCKED" : "ACTIVE",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      ok: true,
+      uid: targetUid,
+      disabled
+    });
+  } catch (error) {
+    console.error("Failed to lock/unlock user", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({ error: error?.message || "Internal server error" });
+  }
+});
+
+app.delete("/admin/users/:uid", async (req, res) => {
+  try {
+    const decodedToken = await requireAdminAuth(req);
+    const targetUid = typeof req.params.uid === "string" ? req.params.uid.trim() : "";
+
+    if (!targetUid) {
+      throw httpError(400, "uid is required");
+    }
+    if (targetUid === decodedToken.uid) {
+      throw httpError(400, "You cannot delete your own account");
+    }
+
+    await admin.auth().deleteUser(targetUid);
+    await runBestEffort(async () => {
+      await db.collection("users").doc(targetUid).delete();
+    }, "Failed to remove user document after auth deletion");
+
+    return res.json({
+      ok: true,
+      uid: targetUid
+    });
+  } catch (error) {
+    console.error("Failed to delete user", error);
+    const status = Number(error?.status) || 500;
+    return res.status(status).json({ error: error?.message || "Internal server error" });
+  }
+});
+
 const port = Number(process.env.PORT || 8080);
 console.log("[boot] Starting HTTP server", { port });
 app.listen(port, "0.0.0.0", () => {
@@ -825,6 +889,15 @@ async function requireAuth(req) {
   }
 
   return admin.auth().verifyIdToken(idToken);
+}
+
+async function requireAdminAuth(req) {
+  const decodedToken = await requireAuth(req);
+  const adminAccess = decodedToken?.admin === true || decodedToken?.moderator === true;
+  if (!adminAccess) {
+    throw httpError(403, "Admin or moderator access is required");
+  }
+  return decodedToken;
 }
 
 async function fetchOrdersForActor({

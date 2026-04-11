@@ -13,6 +13,7 @@ Thu muc `backend/` nay co the duoc tach ra thanh 1 repo GitHub rieng va deploy d
 - Tu dong xoa token loi
 - Nhan webhook SePay va luu giao dich vao Firestore
 - Tu dong doi soat giao dich SePay voi order dang `WAITING_PAYMENT`
+- API admin lock/unlock/delete user cho web admin
 
 ## Setup
 
@@ -48,6 +49,15 @@ Xoa role:
 ```bash
 npm run grant:admin -- --email admin@uni.com --role admin --remove
 ```
+
+## API quan tri user (cho web admin)
+
+- `POST /admin/users/:uid/lock` body `{ "disabled": true|false }`
+- `DELETE /admin/users/:uid`
+
+Yeu cau:
+- Header `Authorization: Bearer <Firebase ID token>`
+- Token phai co custom claim `admin: true` hoac `moderator: true`
 
 ## Bien moi truong
 
