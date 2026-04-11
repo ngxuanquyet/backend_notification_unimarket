@@ -394,7 +394,7 @@ app.post("/orders/:orderId/status", async (req, res) => {
         buyerId === actorId && nextStatus === "WAITING_CONFIRMATION";
       const isBuyerCancellingPendingPayment =
         buyerId === actorId &&
-        currentStatus === "WAITING_PAYMENT" &&
+        (currentStatus === "WAITING_PAYMENT" || currentStatus === "WAITING_CONFIRMATION") &&
         nextStatus === "CANCELLED";
       logInfo("order-status", "Loaded order for status update", {
         orderId,
