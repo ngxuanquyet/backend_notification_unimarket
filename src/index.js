@@ -213,6 +213,7 @@ app.post("/checkout/buy-now", async (req, res) => {
     const buyerId = decodedToken.uid;
     const purchase = normalizePurchaseRequest(req.body || {});
     const isTransferPayment = isTransferPaymentMethod(purchase.paymentMethod);
+    const isWalletPayment = isWalletPaymentMethod(purchase.paymentMethod);
 
     const result = await db.runTransaction(async (transaction) => {
       const productRef = db.collection("products").doc(purchase.productId);
@@ -220,11 +221,13 @@ app.post("/checkout/buy-now", async (req, res) => {
       const buyerRef = db.collection("users").doc(buyerId);
 
       const productSnap = await transaction.get(productRef);
+      const buyerSnap = await transaction.get(buyerRef);
       if (!productSnap.exists) {
         throw httpError(404, "This product is no longer available");
       }
 
       const product = productSnap.data() || {};
+      const buyer = buyerSnap.data() || {};
       const sellerId = typeof product.userId === "string" ? product.userId : "";
       const sellerName = typeof product.sellerName === "string" ? product.sellerName : "";
       const productName = typeof product.name === "string" ? product.name : "";
@@ -247,6 +250,10 @@ app.post("/checkout/buy-now", async (req, res) => {
       const deliveryFee = purchase.deliveryMethod === "SHIPPING" ? SHIPPING_FEE : 0;
       const subtotal = unitPrice * purchase.quantity;
       const total = subtotal + PLATFORM_FEE + deliveryFee;
+      const currentWalletBalance = Number(buyer.walletBalance || 0);
+      if (isWalletPayment && currentWalletBalance < total) {
+        throw httpError(409, "Insufficient wallet balance");
+      }
       const transferContent = isTransferPayment ? buildTransferContent(orderRef.id) : "";
       const paymentExpiresAt = isTransferPayment
         ? Date.now() + TRANSFER_PAYMENT_WINDOW_MS
@@ -297,13 +304,13 @@ app.post("/checkout/buy-now", async (req, res) => {
         { merge: true }
       );
       if (!isTransferPayment) {
-        transaction.set(
-          buyerRef,
-          {
-            boughtCount: admin.firestore.FieldValue.increment(1)
-          },
-          { merge: true }
-        );
+        const buyerUpdate = {
+          boughtCount: admin.firestore.FieldValue.increment(1)
+        };
+        if (isWalletPayment) {
+          buyerUpdate.walletBalance = admin.firestore.FieldValue.increment(-total);
+        }
+        transaction.set(buyerRef, buyerUpdate, { merge: true });
         transaction.set(
           sellerRef,
           {
@@ -380,6 +387,7 @@ app.post("/orders/:orderId/status", async (req, res) => {
       const quantity = Number.isFinite(Number(order.quantity)) && Number(order.quantity) > 0
         ? Number(order.quantity)
         : 1;
+      const totalAmount = Number(order.total || order.totalAmount || 0);
       const currentStatus = normalizeOrderStatus(order.status);
       const nextStatus = statusUpdate.status;
       const deliveryMethod =
@@ -496,6 +504,13 @@ app.post("/orders/:orderId/status", async (req, res) => {
             { merge: true }
           );
         }
+      }
+      if (shouldCreditSellerWallet(currentStatus, nextStatus) && sellerId && totalAmount > 0) {
+        transaction.set(
+          db.collection("users").doc(sellerId),
+          { walletBalance: admin.firestore.FieldValue.increment(totalAmount) },
+          { merge: true }
+        );
       }
 
       return {
@@ -1199,6 +1214,17 @@ function isTransferPaymentMethod(paymentMethod) {
     ? paymentMethod.trim().toUpperCase()
     : "";
   return normalized === "BANK_TRANSFER" || normalized === "MOMO";
+}
+
+function isWalletPaymentMethod(paymentMethod) {
+  const normalized = typeof paymentMethod === "string"
+    ? paymentMethod.trim().toUpperCase()
+    : "";
+  return normalized === "WALLET" || normalized === "WALLET_PAYMENT";
+}
+
+function shouldCreditSellerWallet(currentStatus, nextStatus) {
+  return currentStatus !== "DELIVERED" && nextStatus === "DELIVERED";
 }
 
 function buildTransferContent(orderId) {
