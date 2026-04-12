@@ -2048,7 +2048,7 @@ async function persistNotificationRecord({
   body,
   data
 }) {
-  const created = await db.collection("notifications").add({
+  const payload = {
     receiverId,
     title,
     body,
@@ -2058,7 +2058,14 @@ async function persistNotificationRecord({
     isRead: false,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  };
+
+  const created = await db
+    .collection("users")
+    .doc(receiverId)
+    .collection("notifications")
+    .add(payload);
+
   return created.id;
 }
 
