@@ -1969,11 +1969,16 @@ async function sendNotificationToUser(receiverId, payload) {
   });
 
   await runBestEffort(async () => {
-    await persistNotificationRecord({
+    const notificationId = await persistNotificationRecord({
       receiverId,
       title,
       body,
       data
+    });
+    console.log("Persisted notification record", {
+      notificationId,
+      receiverId,
+      type: data?.type || "system"
     });
   }, "Failed to persist notification record");
 
@@ -2043,7 +2048,7 @@ async function persistNotificationRecord({
   body,
   data
 }) {
-  await db.collection("notifications").add({
+  const created = await db.collection("notifications").add({
     receiverId,
     title,
     body,
@@ -2054,6 +2059,7 @@ async function persistNotificationRecord({
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
+  return created.id;
 }
 
 function extractUserTokens(userData) {
