@@ -633,12 +633,12 @@ class LegacyBackendService {
 
     const normalizedAction = normalizeModerationAction(action);
     if (!normalizedAction) {
-      throw httpError(400, 'action must be APPROVE or REJECT');
+      throw httpError(400, 'action must be APPROVE, REJECT, DISABLE or ENABLE');
     }
 
     const violationReason = typeof reason === 'string' ? reason.trim() : '';
-    if (normalizedAction === 'REJECT' && !violationReason) {
-      throw httpError(400, 'reason is required when rejecting a product');
+    if ((normalizedAction === 'REJECT' || normalizedAction === 'DISABLE') && !violationReason) {
+      throw httpError(400, 'reason is required when rejecting or disabling a product');
     }
 
     const productRef = db.collection('products').doc(productId);
@@ -653,19 +653,21 @@ class LegacyBackendService {
       (typeof product.sellerId === 'string' && product.sellerId.trim()) ||
       '';
     const productName = typeof product.name === 'string' ? product.name.trim() : '';
-    const status = normalizedAction === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+    const status = normalizeProductStatusByModerationAction(normalizedAction);
     const updatePayload = {
       moderationStatus: status,
       status,
-      isVisible: normalizedAction === 'APPROVE',
+      isVisible: status === 'APPROVED',
       reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
       reviewedBy: actorId,
       approvedAt:
-        normalizedAction === 'APPROVE'
+        normalizedAction === 'APPROVE' || normalizedAction === 'ENABLE'
           ? admin.firestore.FieldValue.serverTimestamp()
           : admin.firestore.FieldValue.delete(),
       approvedBy:
-        normalizedAction === 'APPROVE' ? actorId : admin.firestore.FieldValue.delete(),
+        normalizedAction === 'APPROVE' || normalizedAction === 'ENABLE'
+          ? actorId
+          : admin.firestore.FieldValue.delete(),
       rejectedAt:
         normalizedAction === 'REJECT'
           ? admin.firestore.FieldValue.serverTimestamp()
@@ -674,19 +676,24 @@ class LegacyBackendService {
         normalizedAction === 'REJECT' ? actorId : admin.firestore.FieldValue.delete(),
       rejectionReason: normalizedAction === 'REJECT' ? violationReason : admin.firestore.FieldValue.delete(),
       rejectionDetails: normalizedAction === 'REJECT' ? violationReason : admin.firestore.FieldValue.delete(),
+      disabledAt:
+        normalizedAction === 'DISABLE'
+          ? admin.firestore.FieldValue.serverTimestamp()
+          : admin.firestore.FieldValue.delete(),
+      disabledBy:
+        normalizedAction === 'DISABLE' ? actorId : admin.firestore.FieldValue.delete(),
+      disableReason: normalizedAction === 'DISABLE' ? violationReason : admin.firestore.FieldValue.delete(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
     await productRef.set(updatePayload, { merge: true });
 
     if (ownerId) {
-      const title =
-        normalizedAction === 'APPROVE'
-          ? 'Bai dang da duoc duyet'
-          : 'Bai dang bi tu choi';
-      const body =
-        normalizedAction === 'APPROVE'
-          ? `${productName || 'Bai dang cua ban'} da duoc phe duyet va hien thi tren UniMarket.`
-          : `${productName || 'Bai dang cua ban'} bi tu choi. Ly do: ${violationReason}`;
+      const title = buildProductModerationNotificationTitle(normalizedAction);
+      const body = buildProductModerationNotificationBody({
+        action: normalizedAction,
+        productName,
+        reason: violationReason
+      });
       await runBestEffort(async () => {
         await db
           .collection('users')
@@ -783,7 +790,41 @@ function normalizeModerationAction(rawAction) {
   const value = typeof rawAction === 'string' ? rawAction.trim().toUpperCase() : '';
   if (value === 'APPROVE') return 'APPROVE';
   if (value === 'REJECT') return 'REJECT';
+  if (value === 'DISABLE') return 'DISABLE';
+  if (value === 'ENABLE') return 'ENABLE';
   return '';
+}
+
+function normalizeProductStatusByModerationAction(action) {
+  if (action === 'APPROVE' || action === 'ENABLE') return 'APPROVED';
+  if (action === 'REJECT') return 'REJECTED';
+  if (action === 'DISABLE') return 'DISABLED';
+  return 'UNKNOWN';
+}
+
+function buildProductModerationNotificationTitle(action) {
+  if (action === 'APPROVE') return 'Bai dang da duoc duyet';
+  if (action === 'REJECT') return 'Bai dang bi tu choi';
+  if (action === 'DISABLE') return 'Bai dang bi vo hieu hoa';
+  if (action === 'ENABLE') return 'Bai dang da duoc kich hoat lai';
+  return 'Cap nhat bai dang';
+}
+
+function buildProductModerationNotificationBody({ action, productName, reason }) {
+  const resolvedName = productName || 'Bai dang cua ban';
+  if (action === 'APPROVE') {
+    return `${resolvedName} da duoc phe duyet va hien thi tren UniMarket.`;
+  }
+  if (action === 'REJECT') {
+    return `${resolvedName} bi tu choi. Ly do: ${reason}`;
+  }
+  if (action === 'DISABLE') {
+    return `${resolvedName} bi vo hieu hoa do vi pham. Ly do: ${reason}`;
+  }
+  if (action === 'ENABLE') {
+    return `${resolvedName} da duoc kich hoat lai tren UniMarket.`;
+  }
+  return `${resolvedName} da duoc cap nhat.`;
 }
 
 async function requireAuth(req) {
