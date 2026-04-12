@@ -1406,6 +1406,13 @@ async function expirePendingTransferOrder({ orderId, order }) {
       };
     }
 
+    let productRef = null;
+    let productSnap = null;
+    if (productId) {
+      productRef = db.collection("products").doc(productId);
+      productSnap = await transaction.get(productRef);
+    }
+
     // Remove expired unpaid order from all order collections.
     transaction.delete(orderRef);
     if (buyerId) {
@@ -1419,9 +1426,7 @@ async function expirePendingTransferOrder({ orderId, order }) {
       );
     }
 
-    if (productId) {
-      const productRef = db.collection("products").doc(productId);
-      const productSnap = await transaction.get(productRef);
+    if (productRef && productSnap) {
       if (productSnap.exists) {
         const product = productSnap.data() || {};
         const availableQuantity = Math.max(0, Number(product.quantityAvailable || 0));
