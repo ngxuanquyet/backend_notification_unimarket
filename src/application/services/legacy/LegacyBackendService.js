@@ -1919,6 +1919,23 @@ async function sendNotificationToUser(receiverId, payload) {
   const receiverSnap = await db.collection("users").doc(receiverId).get();
   if (!receiverSnap.exists) return 0;
 
+  const title = typeof payload?.title === "string" ? payload.title : "UniMarket";
+  const body = typeof payload?.body === "string" ? payload.body : "";
+  const data = sanitizeNotificationData({
+    title,
+    body,
+    ...(payload?.data || {})
+  });
+
+  await runBestEffort(async () => {
+    await persistNotificationRecord({
+      receiverId,
+      title,
+      body,
+      data
+    });
+  }, "Failed to persist notification record");
+
   const receiverData = receiverSnap.data() || {};
   const { tokens, primaryToken } = extractUserTokens(receiverData);
   console.log("Receiver tokens", {
@@ -1928,14 +1945,6 @@ async function sendNotificationToUser(receiverId, payload) {
   });
 
   if (tokens.length === 0) return 0;
-
-  const title = typeof payload?.title === "string" ? payload.title : "UniMarket";
-  const body = typeof payload?.body === "string" ? payload.body : "";
-  const data = sanitizeNotificationData({
-    title,
-    body,
-    ...(payload?.data || {})
-  });
 
   const response = await messaging.sendEachForMulticast({
     tokens,
@@ -1985,6 +1994,25 @@ async function sendNotificationToUser(receiverId, payload) {
   }
 
   return response.successCount;
+}
+
+async function persistNotificationRecord({
+  receiverId,
+  title,
+  body,
+  data
+}) {
+  await db.collection("notifications").add({
+    receiverId,
+    title,
+    body,
+    message: body,
+    type: typeof data?.type === "string" ? data.type : "system",
+    data: data || {},
+    isRead: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
 }
 
 function extractUserTokens(userData) {
