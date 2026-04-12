@@ -15,6 +15,35 @@ Thu muc `backend/` nay co the duoc tach ra thanh 1 repo GitHub rieng va deploy d
 - Tu dong doi soat giao dich SePay voi order dang `WAITING_PAYMENT`
 - API admin lock/unlock/delete user cho web admin
 
+## Architecture (Clean Architecture + MVC)
+
+```text
+src/
+  domain/
+    constants/
+  application/
+    usecases/
+    services/
+      modules/
+      legacy/
+  infrastructure/
+    config/
+    firebase/
+  presentation/
+    controllers/
+    routes/
+  app.js
+  index.js
+```
+
+Responsibilities:
+- `presentation/routes`: define endpoint map (`/orders/*`, `/admin/*`, `/webhooks/*`).
+- `presentation/controllers`: HTTP adapter (req/res, status code, error mapping).
+- `application/usecases`: orchestrate use-case calls.
+- `application/services/modules`: service slices by business capability.
+- `application/services/legacy`: legacy monolith retained for safe phase-1 migration.
+- `infrastructure/*`: env and Firebase Admin initialization.
+
 ## Setup
 
 1. Vao Firebase Console va tao service account key JSON
@@ -85,55 +114,6 @@ Neu ban tach rieng `backend/` thanh 1 repo:
 6. Doi `NOTIFICATION_SERVER_BASE_URL` trong app Android sang URL do
 7. Cau hinh webhook SePay tro toi:
    `https://unimarket-notification-backend.onrender.com/webhooks/sepay`
-
-Luu y:
-- Render yeu cau app bind vao `0.0.0.0` va dung `PORT` env var, backend nay da ho tro san.
-- Khong nen commit file `service-account.json` len GitHub public.
-- Neu dung SePay, nen cau hinh `Request Content Type = application/json`.
-- Neu dung xac thuc `API Key`, backend se kiem tra header `Authorization: Apikey <SEPAY_WEBHOOK_API_KEY>`.
-- Webhook SePay nen tra ve JSON co `success: true`; backend nay da tra theo dung quy uoc do.
-
-## Tich hop SePay
-
-1. Tren SePay, tao webhook URL:
-   `https://<backend-domain>/webhooks/sepay`
-2. Chon su kien `Co tien vao`
-3. Chon `Request Content Type = application/json`
-4. Neu chon xac thuc `API Key`, dat cung gia tri voi env `SEPAY_WEBHOOK_API_KEY`
-5. Neu chon xac thuc secret key, dat cung gia tri voi env `SEPAY_WEBHOOK_SECRET_KEY`
-
-Webhook SePay se gui payload JSON voi cac field nhu `id`, `accountNumber`, `content`, `code`, `transferAmount`, `transferType`, `description`. Backend se:
-
-- luu raw transaction vao collection `paymentTransactions`
-- co gang rut ra ma thanh toan dang `UM<orderId>` tu `code`, `content` hoac `description`
-- neu tim thay order dang `WAITING_PAYMENT` va so tien/tai khoan khop, backend se doi order sang `WAITING_CONFIRMATION`
-
-Neu app van poll mai, hay kiem tra:
-
-- order co `transferContent` dung dang `UM<orderId>` hay khong
-- noi dung chuyen khoan thuc te co chua ma do hay khong
-- SePay webhook co goi thanh cong toi `/webhooks/sepay` hay khong
-- collection `paymentTransactions` co doc `sepay_<transactionId>` vua tao hay khong
-
-## Day backend len GitHub
-
-Neu ban dang dung thu muc nay nhu 1 repo rieng:
-
-```bash
-cd backend
-git init
-git add .
-git commit -m "Initial notification backend"
-git branch -M main
-git remote add origin <github-repo-url>
-git push -u origin main
-```
-
-Truoc khi push, dam bao cac file nay KHONG bi commit:
-- `.env`
-- `service-account.json`
-- `*firebase-adminsdk*.json`
-- `node_modules/`
 
 ## Ket noi Android
 
