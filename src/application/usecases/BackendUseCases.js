@@ -39,6 +39,10 @@ class BackendUseCases {
     return this.service.deleteUser(input);
   }
 
+  moderateProduct(input) {
+    return this.service.moderateProduct(input);
+  }
+
   requireAuthFromHeader(header) {
     return this.service.requireAuthFromHeader(header);
   }

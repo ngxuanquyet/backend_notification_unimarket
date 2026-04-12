@@ -626,6 +626,105 @@ class LegacyBackendService {
     };
   }
 
+  async moderateProduct({ actorId, productId, action, reason }) {
+    if (!productId) {
+      throw httpError(400, 'productId is required');
+    }
+
+    const normalizedAction = normalizeModerationAction(action);
+    if (!normalizedAction) {
+      throw httpError(400, 'action must be APPROVE or REJECT');
+    }
+
+    const violationReason = typeof reason === 'string' ? reason.trim() : '';
+    if (normalizedAction === 'REJECT' && !violationReason) {
+      throw httpError(400, 'reason is required when rejecting a product');
+    }
+
+    const productRef = db.collection('products').doc(productId);
+    const productSnap = await productRef.get();
+    if (!productSnap.exists) {
+      throw httpError(404, 'Product not found');
+    }
+
+    const product = productSnap.data() || {};
+    const ownerId =
+      (typeof product.userId === 'string' && product.userId.trim()) ||
+      (typeof product.sellerId === 'string' && product.sellerId.trim()) ||
+      '';
+    const productName = typeof product.name === 'string' ? product.name.trim() : '';
+    const status = normalizedAction === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+    const updatePayload = {
+      moderationStatus: status,
+      status,
+      isVisible: normalizedAction === 'APPROVE',
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewedBy: actorId,
+      approvedAt:
+        normalizedAction === 'APPROVE'
+          ? admin.firestore.FieldValue.serverTimestamp()
+          : admin.firestore.FieldValue.delete(),
+      approvedBy:
+        normalizedAction === 'APPROVE' ? actorId : admin.firestore.FieldValue.delete(),
+      rejectedAt:
+        normalizedAction === 'REJECT'
+          ? admin.firestore.FieldValue.serverTimestamp()
+          : admin.firestore.FieldValue.delete(),
+      rejectedBy:
+        normalizedAction === 'REJECT' ? actorId : admin.firestore.FieldValue.delete(),
+      rejectionReason: normalizedAction === 'REJECT' ? violationReason : admin.firestore.FieldValue.delete(),
+      rejectionDetails: normalizedAction === 'REJECT' ? violationReason : admin.firestore.FieldValue.delete(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await productRef.set(updatePayload, { merge: true });
+
+    if (ownerId) {
+      const title =
+        normalizedAction === 'APPROVE'
+          ? 'Bai dang da duoc duyet'
+          : 'Bai dang bi tu choi';
+      const body =
+        normalizedAction === 'APPROVE'
+          ? `${productName || 'Bai dang cua ban'} da duoc phe duyet va hien thi tren UniMarket.`
+          : `${productName || 'Bai dang cua ban'} bi tu choi. Ly do: ${violationReason}`;
+      await runBestEffort(async () => {
+        await db
+          .collection('users')
+          .doc(ownerId)
+          .collection('notifications')
+          .add({
+            type: 'product_moderation',
+            productId,
+            action: normalizedAction,
+            title,
+            body,
+            reason: normalizedAction === 'REJECT' ? violationReason : '',
+            isRead: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+      }, 'Failed to persist product moderation notification');
+
+      await runBestEffort(async () => {
+        await sendNotificationToUser(ownerId, {
+          title,
+          body,
+          data: {
+            type: 'product_moderation',
+            productId,
+            action: normalizedAction
+          }
+        });
+      }, 'Failed to send product moderation push notification');
+    }
+
+    return {
+      ok: true,
+      productId,
+      status,
+      ownerId
+    };
+  }
+
   async requireAuthFromHeader(authorizationHeader) {
     const authHeader = authorizationHeader || '';
     const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
@@ -678,6 +777,13 @@ function verifySePayWebhook(req) {
 function parseSePayApiKey(headerValue) {
   const match = /^Apikey\s+(.+)$/i.exec(headerValue || "");
   return match ? match[1].trim() : "";
+}
+
+function normalizeModerationAction(rawAction) {
+  const value = typeof rawAction === 'string' ? rawAction.trim().toUpperCase() : '';
+  if (value === 'APPROVE') return 'APPROVE';
+  if (value === 'REJECT') return 'REJECT';
+  return '';
 }
 
 async function requireAuth(req) {

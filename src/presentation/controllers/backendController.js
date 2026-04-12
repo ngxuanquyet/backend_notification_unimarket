@@ -90,7 +90,21 @@ function createBackendController(useCases) {
         targetUid
       });
       res.json(result);
-    }, 'Failed to delete user')
+    }, 'Failed to delete user'),
+
+    moderateProduct: handle(async (req, res) => {
+      const decodedToken = await useCases.requireAdminAuthFromHeader(req.headers.authorization);
+      const productId = typeof req.params.productId === 'string' ? req.params.productId.trim() : '';
+      const action = typeof req.body?.action === 'string' ? req.body.action.trim() : '';
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+      const result = await useCases.moderateProduct({
+        actorId: decodedToken.uid,
+        productId,
+        action,
+        reason
+      });
+      res.json(result);
+    }, 'Failed to moderate product')
   };
 }
 

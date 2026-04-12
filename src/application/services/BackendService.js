@@ -1,6 +1,7 @@
 const { LegacyBackendService } = require('./legacy/LegacyBackendService');
 const { AuthService } = require('./modules/AuthService');
 const { AdminUserService } = require('./modules/AdminUserService');
+const { AdminProductService } = require('./modules/AdminProductService');
 const { NotificationService } = require('./modules/NotificationService');
 const { CommerceService } = require('./modules/CommerceService');
 const { SePayWebhookService } = require('./modules/SePayWebhookService');
@@ -11,6 +12,7 @@ class BackendService {
 
     this.authService = new AuthService(legacy);
     this.adminUserService = new AdminUserService(legacy);
+    this.adminProductService = new AdminProductService(legacy);
     this.notificationService = new NotificationService(legacy);
     this.commerceService = new CommerceService(legacy);
     this.sepayWebhookService = new SePayWebhookService(legacy);
@@ -50,6 +52,10 @@ class BackendService {
 
   deleteUser(input) {
     return this.adminUserService.deleteUser(input);
+  }
+
+  moderateProduct(input) {
+    return this.adminProductService.moderateProduct(input);
   }
 
   requireAuthFromHeader(authorizationHeader) {

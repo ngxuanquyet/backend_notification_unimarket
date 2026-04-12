@@ -12,6 +12,7 @@ function registerRoutes(app, controller) {
 
   app.post('/admin/users/:uid/lock', controller.lockUser);
   app.delete('/admin/users/:uid', controller.deleteUser);
+  app.post('/admin/products/:productId/moderate', controller.moderateProduct);
 }
 
 module.exports = {
