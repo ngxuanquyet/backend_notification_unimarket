@@ -1215,7 +1215,11 @@ function shouldRestockInventory(currentStatus, nextStatus) {
 }
 
 function shouldRollbackCounters(currentStatus, nextStatus) {
-  return nextStatus === "CANCELLED" && currentStatus !== "CANCELLED";
+  // Transfer orders in WAITING_PAYMENT are not counted yet.
+  // Rolling back in that state can push bought/sold counters negative.
+  return nextStatus === "CANCELLED" &&
+    currentStatus !== "CANCELLED" &&
+    currentStatus !== "WAITING_PAYMENT";
 }
 
 function normalizeOrderStatus(rawStatus) {
