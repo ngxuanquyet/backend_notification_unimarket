@@ -5,6 +5,7 @@ const { AdminProductService } = require('./modules/AdminProductService');
 const { NotificationService } = require('./modules/NotificationService');
 const { CommerceService } = require('./modules/CommerceService');
 const { SePayWebhookService } = require('./modules/SePayWebhookService');
+const { TwilioVerifyService } = require('./modules/TwilioVerifyService');
 
 class BackendService {
   constructor(dependencies) {
@@ -16,10 +17,19 @@ class BackendService {
     this.notificationService = new NotificationService(legacy);
     this.commerceService = new CommerceService(legacy);
     this.sepayWebhookService = new SePayWebhookService(legacy);
+    this.twilioVerifyService = new TwilioVerifyService();
   }
 
   processSePayWebhook(input) {
     return this.sepayWebhookService.processSePayWebhook(input);
+  }
+
+  sendOtp(input) {
+    return this.twilioVerifyService.sendOtp(input);
+  }
+
+  verifyOtp(input) {
+    return this.twilioVerifyService.verifyOtp(input);
   }
 
   sendChatNotification(input) {

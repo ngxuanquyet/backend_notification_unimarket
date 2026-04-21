@@ -7,6 +7,14 @@ class BackendUseCases {
     return this.service.processSePayWebhook(input);
   }
 
+  sendOtp(input) {
+    return this.service.sendOtp(input);
+  }
+
+  verifyOtp(input) {
+    return this.service.verifyOtp(input);
+  }
+
   sendChatNotification(input) {
     return this.service.sendChatNotification(input);
   }
