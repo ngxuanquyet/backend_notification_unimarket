@@ -2,9 +2,9 @@ const twilio = require('twilio');
 
 class TwilioVerifyService {
   constructor() {
-    this.accountSid = process.env.TWILIO_ACCOUNT_SID || '';
-    this.authToken = process.env.TWILIO_AUTH_TOKEN || '';
-    this.verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID || '';
+    this.accountSid = (process.env.TWILIO_ACCOUNT_SID || '').trim();
+    this.authToken = (process.env.TWILIO_AUTH_TOKEN || '').trim();
+    this.verifyServiceSid = (process.env.TWILIO_VERIFY_SERVICE_SID || '').trim();
     this.twilioRegion = (process.env.TWILIO_REGION || '').trim().toLowerCase();
     this.twilioEdge = (process.env.TWILIO_EDGE || '').trim().toLowerCase();
     const clientOptions = {};
@@ -18,6 +18,7 @@ class TwilioVerifyService {
       this.accountSid && this.authToken
         ? twilio(this.accountSid, this.authToken, clientOptions)
         : null;
+    this.logConfiguration();
   }
 
   async sendOtp(input) {
@@ -75,6 +76,20 @@ class TwilioVerifyService {
       );
     }
   }
+
+  logConfiguration() {
+    console.log('[twilio-verify] config', {
+      hasAccountSid: Boolean(this.accountSid),
+      accountSidMask: maskValue(this.accountSid),
+      hasAuthToken: Boolean(this.authToken),
+      authTokenLength: this.authToken.length,
+      authTokenMask: maskValue(this.authToken),
+      hasVerifyServiceSid: Boolean(this.verifyServiceSid),
+      verifyServiceSidMask: maskValue(this.verifyServiceSid),
+      region: this.twilioRegion || 'default',
+      edge: this.twilioEdge || 'default'
+    });
+  }
 }
 
 function normalizePhoneNumber(rawPhoneNumber) {
@@ -100,6 +115,12 @@ function httpError(status, message) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function maskValue(raw) {
+  if (!raw) return '<empty>';
+  if (raw.length <= 6) return '***';
+  return `${raw.slice(0, 4)}***${raw.slice(-3)}`;
 }
 
 module.exports = {
