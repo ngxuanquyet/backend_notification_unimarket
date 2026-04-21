@@ -14,21 +14,6 @@ function createBackendController(useCases) {
       res.json({ ok: true });
     },
 
-    sendOtp: handle(async (req, res) => {
-      const result = await useCases.sendOtp({
-        phoneNumber: req.body?.phoneNumber
-      });
-      res.json(result);
-    }, 'Failed to send OTP'),
-
-    verifyOtp: handle(async (req, res) => {
-      const result = await useCases.verifyOtp({
-        phoneNumber: req.body?.phoneNumber,
-        code: req.body?.code
-      });
-      res.json(result);
-    }, 'Failed to verify OTP'),
-
     sepayWebhook: handle(async (req, res) => {
       const result = await useCases.processSePayWebhook({
         headers: req.headers,

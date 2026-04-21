@@ -252,13 +252,20 @@ class LegacyBackendService {
         { merge: true }
       );
       if (!isTransferPayment) {
-        const buyerUpdate = {};
+        const buyerUpdate = {
+          boughtCount: admin.firestore.FieldValue.increment(1)
+        };
         if (isWalletPayment) {
           buyerUpdate.walletBalance = admin.firestore.FieldValue.increment(-total);
         }
-        if (Object.keys(buyerUpdate).length > 0) {
-          transaction.set(buyerRef, buyerUpdate, { merge: true });
-        }
+        transaction.set(buyerRef, buyerUpdate, { merge: true });
+        transaction.set(
+          sellerRef,
+          {
+            soldCount: admin.firestore.FieldValue.increment(1)
+          },
+          { merge: true }
+        );
       }
 
       return {
@@ -418,18 +425,18 @@ class LegacyBackendService {
         );
       }
 
-      if (shouldIncrementOrderCounters(currentStatus, nextStatus)) {
+      if (shouldRollbackCounters(currentStatus, nextStatus)) {
         if (buyerId) {
           transaction.set(
             db.collection('users').doc(buyerId),
-            { boughtCount: admin.firestore.FieldValue.increment(1) },
+            { boughtCount: admin.firestore.FieldValue.increment(-1) },
             { merge: true }
           );
         }
         if (sellerId) {
           transaction.set(
             db.collection('users').doc(sellerId),
-            { soldCount: admin.firestore.FieldValue.increment(1) },
+            { soldCount: admin.firestore.FieldValue.increment(-1) },
             { merge: true }
           );
         }
@@ -1207,8 +1214,12 @@ function shouldRestockInventory(currentStatus, nextStatus) {
   return nextStatus === "CANCELLED" && currentStatus !== "CANCELLED";
 }
 
-function shouldIncrementOrderCounters(currentStatus, nextStatus) {
-  return currentStatus !== "DELIVERED" && nextStatus === "DELIVERED";
+function shouldRollbackCounters(currentStatus, nextStatus) {
+  // Transfer orders in WAITING_PAYMENT are not counted yet.
+  // Rolling back in that state can push bought/sold counters negative.
+  return nextStatus === "CANCELLED" &&
+    currentStatus !== "CANCELLED" &&
+    currentStatus !== "WAITING_PAYMENT";
 }
 
 function normalizeOrderStatus(rawStatus) {
@@ -1503,11 +1514,21 @@ async function confirmTransferPayment({ orderId, order, paymentMatch }) {
         orderStatusPayload,
         { merge: true }
       );
+      transaction.set(
+        db.collection("users").doc(buyerId),
+        { boughtCount: admin.firestore.FieldValue.increment(1) },
+        { merge: true }
+      );
     }
     if (sellerId) {
       transaction.set(
         db.collection("users").doc(sellerId).collection("orders").doc(orderId),
         orderStatusPayload,
+        { merge: true }
+      );
+      transaction.set(
+        db.collection("users").doc(sellerId),
+        { soldCount: admin.firestore.FieldValue.increment(1) },
         { merge: true }
       );
     }

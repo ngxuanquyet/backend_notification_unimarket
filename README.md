@@ -14,7 +14,6 @@ Thu muc `backend/` nay co the duoc tach ra thanh 1 repo GitHub rieng va deploy d
 - Nhan webhook SePay va luu giao dich vao Firestore
 - Tu dong doi soat giao dich SePay voi order dang `WAITING_PAYMENT`
 - API admin lock/unlock/delete user cho web admin
-- API OTP SMS voi Twilio Verify (`/auth/otp/send`, `/auth/otp/verify`)
 
 ## Architecture (Clean Architecture + MVC)
 
@@ -97,22 +96,6 @@ Yeu cau:
 - `FIREBASE_SERVICE_ACCOUNT_JSON`: toan bo noi dung service account JSON tren 1 dong
 - `SEPAY_WEBHOOK_API_KEY`: API Key ma SePay gui trong header `Authorization: Apikey ...`
 - `SEPAY_WEBHOOK_SECRET_KEY`: secret key neu ban cau hinh SePay gui qua header `X-Secret-Key`
-- `TWILIO_ACCOUNT_SID`: SID tai khoan Twilio (`AC...`)
-- `TWILIO_AUTH_TOKEN`: Auth Token Twilio (secret)
-- `TWILIO_VERIFY_SERVICE_SID`: Verify Service SID (`VA...`)
-- `TWILIO_REGION`: tuy chon, vi du `au1` neu dung Regional Twilio
-- `TWILIO_EDGE`: tuy chon, vi du `sydney`
-
-## API OTP SMS (Twilio Verify)
-
-- `POST /auth/otp/send`
-  - Body: `{ "phoneNumber": "+84901234567" }`
-- `POST /auth/otp/verify`
-  - Body: `{ "phoneNumber": "+84901234567", "code": "123456" }`
-
-Luu y:
-- `phoneNumber` bat buoc dung dinh dang E.164 (`+` + ma quoc gia + so dien thoai).
-- Khong goi Twilio truc tiep tu app Android; app chi goi backend API nay.
 
 ## Deploy Render
 

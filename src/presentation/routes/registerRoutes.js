@@ -1,7 +1,5 @@
 function registerRoutes(app, controller) {
   app.get('/health', controller.health);
-  app.post('/auth/otp/send', controller.sendOtp);
-  app.post('/auth/otp/verify', controller.verifyOtp);
 
   app.post('/webhooks/sepay', controller.sepayWebhook);
   app.post('/notifications/chat', controller.chatNotification);
