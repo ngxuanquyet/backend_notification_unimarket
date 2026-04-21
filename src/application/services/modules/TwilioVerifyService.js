@@ -5,8 +5,19 @@ class TwilioVerifyService {
     this.accountSid = process.env.TWILIO_ACCOUNT_SID || '';
     this.authToken = process.env.TWILIO_AUTH_TOKEN || '';
     this.verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID || '';
+    this.twilioRegion = (process.env.TWILIO_REGION || '').trim().toLowerCase();
+    this.twilioEdge = (process.env.TWILIO_EDGE || '').trim().toLowerCase();
+    const clientOptions = {};
+    if (this.twilioRegion) {
+      clientOptions.region = this.twilioRegion;
+    }
+    if (this.twilioEdge) {
+      clientOptions.edge = this.twilioEdge;
+    }
     this.client =
-      this.accountSid && this.authToken ? twilio(this.accountSid, this.authToken) : null;
+      this.accountSid && this.authToken
+        ? twilio(this.accountSid, this.authToken, clientOptions)
+        : null;
   }
 
   async sendOtp(input) {

@@ -100,6 +100,8 @@ Yeu cau:
 - `TWILIO_ACCOUNT_SID`: SID tai khoan Twilio (`AC...`)
 - `TWILIO_AUTH_TOKEN`: Auth Token Twilio (secret)
 - `TWILIO_VERIFY_SERVICE_SID`: Verify Service SID (`VA...`)
+- `TWILIO_REGION`: tuy chon, vi du `au1` neu dung Regional Twilio
+- `TWILIO_EDGE`: tuy chon, vi du `sydney`
 
 ## API OTP SMS (Twilio Verify)
 
