@@ -162,6 +162,8 @@ class LegacyBackendService {
     const isTransferPayment = isTransferPaymentMethod(purchase.paymentMethod);
     const isWalletPayment = isWalletPaymentMethod(purchase.paymentMethod);
 
+    const platformFeePercent = await getPlatformFeePercent();
+
     const result = await db.runTransaction(async (transaction) => {
       const productRef = db.collection('products').doc(purchase.productId);
       const orderRef = db.collection('orders').doc();
@@ -198,7 +200,8 @@ class LegacyBackendService {
       const remainingQuantity = availableQuantity - purchase.quantity;
       const deliveryFee = purchase.deliveryMethod === 'SHIPPING' ? SHIPPING_FEE : 0;
       const subtotal = unitPrice * purchase.quantity;
-      const total = subtotal + PLATFORM_FEE + deliveryFee;
+      const platformFee = calculatePlatformFee(subtotal, platformFeePercent);
+      const total = subtotal + platformFee + deliveryFee;
       const currentWalletBalance = Number(buyer.walletBalance || 0);
       if (isWalletPayment && currentWalletBalance < total) {
         throw httpError(409, 'Insufficient wallet balance');
@@ -224,7 +227,8 @@ class LegacyBackendService {
         unitPrice,
         quantity: purchase.quantity,
         subtotal,
-        platformFee: PLATFORM_FEE,
+        platformFee,
+        platformFeePercent,
         deliveryFee,
         total,
         paymentMethod: purchase.paymentMethod,
@@ -328,6 +332,8 @@ class LegacyBackendService {
           ? Number(order.quantity)
           : 1;
       const totalAmount = Number(order.total || order.totalAmount || 0);
+      const platformFee = Math.max(0, Number(order.platformFee || 0));
+      const sellerReceivableAmount = Math.max(0, totalAmount - platformFee);
       const currentStatus = normalizeOrderStatus(order.status);
       const nextStatus = statusUpdate.status;
       const deliveryMethod = typeof order.deliveryMethod === 'string' ? order.deliveryMethod.trim() : '';
@@ -394,16 +400,16 @@ class LegacyBackendService {
 
       let sellerWalletCredit = null;
       const shouldCreditWallet = shouldCreditSellerWallet(currentStatus, nextStatus);
-      if (shouldCreditWallet && sellerId && totalAmount > 0) {
+      if (shouldCreditWallet && sellerId && sellerReceivableAmount > 0) {
         const sellerUserRef = db.collection('users').doc(sellerId);
         const sellerUserSnap = await transaction.get(sellerUserRef);
         const sellerData = sellerUserSnap.data() || {};
         const currentWalletBalance = Number(sellerData.walletBalance || 0);
         sellerWalletCredit = {
           sellerUserRef,
-          amount: totalAmount,
+          amount: sellerReceivableAmount,
           beforeBalance: currentWalletBalance,
-          afterBalance: currentWalletBalance + totalAmount
+          afterBalance: currentWalletBalance + sellerReceivableAmount
         };
       }
 
@@ -2111,7 +2117,58 @@ function httpError(status, message) {
   return error;
 }
 
-const PLATFORM_FEE = 1500;
+function calculatePlatformFee(subtotal, percent) {
+  const safeSubtotal = Number(subtotal || 0);
+  const safePercent = Math.min(100, Math.max(0, Number(percent || 0)));
+  if (!Number.isFinite(safeSubtotal) || safeSubtotal <= 0 || safePercent <= 0) {
+    return 0;
+  }
+  return Math.round((safeSubtotal * safePercent) / 100);
+}
+
+async function getPlatformFeePercent() {
+  const cachedAt = platformFeePercentCache.updatedAt;
+  if (cachedAt && Date.now() - cachedAt < PLATFORM_FEE_PERCENT_CACHE_MS) {
+    return platformFeePercentCache.value;
+  }
+
+  const envValue = parsePlatformFeePercent(process.env.PLATFORM_FEE);
+  let remoteValue = null;
+
+  if (admin?.remoteConfig) {
+    try {
+      const template = await admin.remoteConfig().getTemplate();
+      remoteValue = parsePlatformFeePercent(
+        template?.parameters?.PLATFORM_FEE?.defaultValue?.value
+      );
+    } catch (error) {
+      logWarn('checkout', 'Failed to load PLATFORM_FEE from Remote Config', {
+        message: error?.message || String(error)
+      });
+    }
+  }
+
+  const value = remoteValue ?? envValue ?? DEFAULT_PLATFORM_FEE_PERCENT;
+  platformFeePercentCache = {
+    value,
+    updatedAt: Date.now()
+  };
+  return value;
+}
+
+function parsePlatformFeePercent(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.min(100, Math.max(0, Math.trunc(parsed)));
+}
+
+let platformFeePercentCache = {
+  value: 0,
+  updatedAt: 0
+};
+
+const DEFAULT_PLATFORM_FEE_PERCENT = 0;
+const PLATFORM_FEE_PERCENT_CACHE_MS = 5 * 60 * 1000;
 const SHIPPING_FEE = 30000;
 const TRANSFER_PAYMENT_WINDOW_MS = 10 * 60 * 1000;
 const SUPPORTED_ORDER_STATUSES = [
